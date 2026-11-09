@@ -104,6 +104,9 @@ final class NonWordPolicyTests: XCTestCase {
         XCTAssertEqual(Policy.boundary(iphone, mode: .auto, hasPrev: false, prevOut: nil, userWord: false), .flag(fixes: ["iphone"], spelling: true))
         let stretched = WordOutcome(typed: "lllmo", out: "lmao", margin: 5.7, gap: 5.7, fixes: ["lmao"], typedOOV: true)
         XCTAssertEqual(Policy.boundary(stretched, mode: .auto, hasPrev: false, prevOut: nil, userWord: false), .flag(fixes: ["lmao"], spelling: true))
+        // even when the lowercase form is a lexicon word
+        let known = WordOutcome(typed: "iPhone", out: "iphone", margin: 5.6, gap: 5.6, fixes: ["iphone"], typedOOV: false)
+        XCTAssertEqual(Policy.boundary(known, mode: .auto, hasPrev: false, prevOut: nil, userWord: false), .keep)
         // a slip with a tripled letter is still a typo
         let assault = WordOutcome(typed: "asssault", out: "assault", margin: 6, gap: 6, fixes: ["assault"], typedOOV: true)
         XCTAssertEqual(Policy.boundary(assault, mode: .auto, hasPrev: false, prevOut: nil, userWord: false), .apply(out: "assault", prevNew: nil, merged: false))

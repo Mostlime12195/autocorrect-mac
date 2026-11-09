@@ -90,6 +90,8 @@ public enum Policy {
     /// (iPhone -> iphone), or rewriting one beyond a slip; un-stretching "sooo" / "lllmo" (a slip fix like "asssault"
     /// -> "assault" is still fine).
     public static func isProtected(_ typed: String, out: String, typedOOV: Bool) -> Bool {
+        // re-casing a mixed-case / ALLCAPS word is never a typo fix, word or not (iPhone -> iphone)
+        if !plainCase(typed) && typed.lowercased() == out.lowercased() && typed != out { return true }
         guard typedOOV else { return false }
         let slip = QualityGuard.looksLikeSlip(typed, of: out)
         if !plainCase(typed) && (typed.lowercased() == out.lowercased() || !slip) { return true }
