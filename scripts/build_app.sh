@@ -16,7 +16,18 @@ rm -rf dist && mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Co
 cp "$BIN" "$APP/Contents/MacOS/Keylime"
 sed -e "s/__VERSION__/$V/" -e "s/__BUILD__/$B/" App/Info.plist > "$APP/Contents/Info.plist"
 cp Resources/lexicon.tsv "$APP/Contents/Resources/"
-cp Resources/AppIcon.icns "$APP/Contents/Resources/" 2>/dev/null || true
+# app icon: Resources/AppIcon.icns from the 1024 px PNG (sips + iconutil) when it's missing or older
+if [ ! -f Resources/AppIcon.icns ] || [ Resources/AppIcon.png -nt Resources/AppIcon.icns ]; then
+  SET="$(mktemp -d)/AppIcon.iconset"
+  mkdir -p "$SET"
+  for s in 16 32 128 256 512; do
+    sips -z $s $s Resources/AppIcon.png --out "$SET/icon_${s}x${s}.png" >/dev/null
+    sips -z $((s * 2)) $((s * 2)) Resources/AppIcon.png --out "$SET/icon_${s}x${s}@2x.png" >/dev/null
+  done
+  iconutil -c icns "$SET" -o Resources/AppIcon.icns
+  rm -rf "$(dirname "$SET")"
+fi
+cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 # under the name the binary links (@rpath/libonnxruntime.1.dylib), as one real file
 NEED=$(otool -L "$APP/Contents/MacOS/Keylime" | awk '/libonnxruntime/ {print $1}' | sed 's#@rpath/##')
 cp -L vendor/onnxruntime/lib/libonnxruntime.*.*.*.dylib "$APP/Contents/Frameworks/$NEED"
