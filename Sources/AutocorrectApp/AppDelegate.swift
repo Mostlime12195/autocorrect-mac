@@ -48,6 +48,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusModel.source = { [weak self] in self?.diagnostics() ?? "" }
         statusModel.testUnderline = { [weak self] in self?.showTestUnderline() }
         settingsModel.openLists = { [weak self] in self?.openLists() }
+        settingsModel.usageSource = { [weak self] in self?.layer.usage() ?? "" }
+        layer.startCpuSampling()
         Updater.shared.onChange = { [weak self] in self?.refreshIcon() }
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -255,7 +257,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return "Keylime \(Updater.currentVersion) on macOS \(ProcessInfo.processInfo.operatingSystemVersionString)\n" +
             "Event tap: \(tap); engine: \(engine.status); keyboard: \(input.layoutName)\n" +
             "System autocorrect: \(SystemAutocorrect.isOn ? "on" : "off")\n" +
-            layer.diagnostics() + "\n" + overlay.diagnostics() + "\n\nRecent events:\n" + log
+            layer.diagnostics() + "\n" + layer.usage() + "\n" + overlay.diagnostics() + "\n\nRecent events:\n" + log
     }
 
     @objc private func openStatus() {
@@ -292,7 +294,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func openSettings() {
-        if settingsWindow == nil { settingsWindow = makeWindow("Keylime Settings", SettingsView(model: settingsModel)) }
+        if settingsWindow == nil {
+            settingsWindow = makeWindow("Keylime Settings", SettingsView(model: settingsModel))
+            NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: settingsWindow, queue: .main) {
+                [weak self] _ in self?.settingsModel.stop()
+            }
+        }
         settingsModel.reload()
         NSApp.activate(ignoringOtherApps: true)
         settingsWindow?.makeKeyAndOrderFront(nil)

@@ -62,6 +62,45 @@ final class Settings {
     /// how long a separator may wait for its correction before it goes out uncorrected
     var holdMs: Int { max(30, min(1000, d.integer(forKey: "holdMs"))) }
 
+    // MARK: performance
+
+    struct Perf: Equatable {
+        /// pause before the sentences around the caret are re-checked
+        var idleSecs: Double
+        /// also re-check every N words while typing (0 = only after a pause)
+        var everyWords: Int
+        /// re-check the whole text box (else: sentences near the caret, a few per pass)
+        var wholeField: Bool
+        /// characters of text before each sentence given to the model
+        var leftChars: Int
+        /// words near a sentence's end also see the next sentence
+        var nextSentence: Bool
+
+        static let battery = Perf(idleSecs: 2.0, everyWords: 0, wholeField: false, leftChars: 120, nextSentence: false)
+        static let balanced = Perf(idleSecs: 1.0, everyWords: 0, wholeField: false, leftChars: 200, nextSentence: false)
+        static let max = Perf(idleSecs: 0.3, everyWords: 2, wholeField: true, leftChars: 300, nextSentence: true)
+        static let presets: [(String, String, Perf)] = [("battery", "Battery saver", battery), ("balanced", "Balanced", balanced), ("max", "Max", max)]
+
+        var presetId: String { Self.presets.first { $0.2 == self }?.0 ?? "custom" }
+    }
+
+    var perf: Perf {
+        get {
+            Perf(idleSecs: min(3, max(0.2, d.object(forKey: "perfIdleSecs") as? Double ?? 1.0)),
+                 everyWords: min(10, max(0, d.object(forKey: "perfEveryWords") as? Int ?? 0)),
+                 wholeField: d.bool(forKey: "perfWholeField"),
+                 leftChars: min(400, max(80, d.object(forKey: "perfLeftChars") as? Int ?? 200)),
+                 nextSentence: d.bool(forKey: "perfNextSentence"))
+        }
+        set {
+            d.set(newValue.idleSecs, forKey: "perfIdleSecs")
+            d.set(newValue.everyWords, forKey: "perfEveryWords")
+            d.set(newValue.wholeField, forKey: "perfWholeField")
+            d.set(newValue.leftChars, forKey: "perfLeftChars")
+            d.set(newValue.nextSentence, forKey: "perfNextSentence")
+        }
+    }
+
     var checkUpdates: Bool {
         get { d.bool(forKey: "checkUpdates") }
         set { d.set(newValue, forKey: "checkUpdates") }

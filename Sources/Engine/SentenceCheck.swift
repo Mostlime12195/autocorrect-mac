@@ -16,7 +16,9 @@ public struct SentenceFix: Equatable {
 public struct SentenceReq {
     public let left: String
     public let sentence: String
-    public init(left: String, sentence: String) { self.left = left; self.sentence = sentence }
+    /// text after the sentence (e.g. the next sentence): words near the end also see this much right context
+    public let after: String
+    public init(left: String, sentence: String, after: String = "") { self.left = left; self.sentence = sentence; self.after = after }
 }
 
 /// The idle pass (port of SentenceCheck.kt): every word of a sentence re-scored with the rest of the sentence as right
@@ -64,7 +66,15 @@ public enum SentenceCheck {
             if ti < 0 || s.cands.count < 2 { continue }
             let (left, sep) = TypingCore.splitLeft(req.left + String(cs[0..<a]))
             let endRight = i + RIGHT_WORDS < words.count ? words[i + RIGHT_WORDS].0 : cs.count
-            let right = trimEnd(String(cs[b..<endRight]))
+            var right = String(cs[b..<endRight])
+            // near the end of the sentence: borrow words from what follows, up to RIGHT_WORDS in all
+            let need = i + RIGHT_WORDS - (words.count - 1)
+            if need > 0 && !req.after.isEmpty {
+                let ac = Array(req.after)
+                let aw = segRanges(req.after)
+                right += aw.count >= need ? String(ac[0..<aw[need - 1].1]) : req.after
+            }
+            right = trimEnd(right)
             let lp = try scorer.score(s.cands.map { LmReq(left, sep + $0 + right) })
             var (k, sc) = choose(s, lp, p.lamRe, p.bias, p.pen)
             if let u = user, k != ti {

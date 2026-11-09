@@ -26,6 +26,11 @@ final class EngineHost {
     var status: String { stateLock.lock(); defer { stateLock.unlock() }; return _status }
     var modelLabel: String { stateLock.lock(); defer { stateLock.unlock() }; return _modelLabel }
     var lastMs: Double { stateLock.lock(); defer { stateLock.unlock() }; return _lastMs }
+    /// jobs queued or running on the engine queue (the usage meter's backlog)
+    private var _pending = 0
+    var pending: Int { stateLock.lock(); defer { stateLock.unlock() }; return _pending }
+    private func begin() { stateLock.lock(); _pending += 1; stateLock.unlock() }
+    private func end() { stateLock.lock(); _pending -= 1; stateLock.unlock() }
     var onChange: (() -> Void)?
 
     let user: UserData
@@ -96,7 +101,8 @@ final class EngineHost {
 
     /// One finished word (AX path). done(result, typed word is in the lexicon), on the engine queue.
     func correctWord(_ input: WordInput, prev: PrevWord?, merge: MergeInput?, done: @escaping (WordResult?, Bool) -> Void) {
-        queue.async { self.correctOnQueue(input, prev, merge, done) }
+        begin()
+        queue.async { self.correctOnQueue(input, prev, merge, done); self.end() }
     }
 
     private func correctOnQueue(_ input: WordInput, _ prev: PrevWord?, _ merge: MergeInput?, _ done: (WordResult?, Bool) -> Void) {
@@ -115,7 +121,9 @@ final class EngineHost {
     /// The idle pass: sentence checks, nearest first. done(fixes per request with "is a spelling fix", nil = cancelled /
     /// no model), on the engine queue.
     func checkSentences(_ reqs: [SentenceReq], cancelled: @escaping () -> Bool, done: @escaping ([[(SentenceFix, Bool)]]?) -> Void) {
+        begin()
         queue.async {
+            defer { self.end() }
             guard let c = self.corrector, let sc = self.scorer else { done(nil); return }
             var out: [[(SentenceFix, Bool)]] = []
             for r in reqs {

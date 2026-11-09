@@ -52,12 +52,24 @@ final class SettingsModel: ObservableObject {
     @Published var preview = Settings.shared.preview { didSet { Settings.shared.preview = preview } }
     @Published var checkUpdates = Settings.shared.checkUpdates { didSet { Settings.shared.checkUpdates = checkUpdates } }
     @Published var systemAutocorrect = SystemAutocorrect.isOn
+    @Published var perf = Settings.shared.perf { didSet { if perf != oldValue { Settings.shared.perf = perf } } }
+    @Published var usage = ""
     var onChange: (() -> Void)?
     var openLists: (() -> Void)?
+    var usageSource: (() -> String)?
+    private var timer: Timer?
     func reload() {
         if mode != Settings.shared.mode { mode = Settings.shared.mode }
         systemAutocorrect = SystemAutocorrect.isOn
+        perf = Settings.shared.perf
+        usage = usageSource?() ?? ""
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            self.usage = self.usageSource?() ?? ""
+        }
     }
+    func stop() { timer?.invalidate(); timer = nil }
 }
 
 struct SettingsView: View {
@@ -84,6 +96,7 @@ struct SettingsView: View {
                     set: { off in SystemAutocorrect.set(!off); model.systemAutocorrect = SystemAutocorrect.isOn }))
                 Text("Apps that are already open may need a restart to notice.").font(.footnote).foregroundColor(.secondary)
             }
+            PerformanceView(model: model)
             VStack(alignment: .leading, spacing: 6) {
                 Text("Other").font(.headline)
                 Toggle("Check for updates automatically", isOn: $model.checkUpdates)
@@ -91,7 +104,7 @@ struct SettingsView: View {
             }
         }
         .padding(20)
-        .frame(width: 440)
+        .frame(width: 520)
     }
 }
 
@@ -135,6 +148,47 @@ struct StatusView: View {
         }
         .padding(14)
         .frame(minWidth: 560, minHeight: 420)
+    }
+}
+
+struct PerformanceView: View {
+    @ObservedObject var model: SettingsModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Performance").font(.headline)
+            Picker("", selection: Binding(
+                get: { model.perf.presetId },
+                set: { id in if let p = Settings.Perf.presets.first(where: { $0.0 == id }) { model.perf = p.2 } })) {
+                ForEach(Settings.Perf.presets, id: \.0) { Text($0.1).tag($0.0) }
+                if model.perf.presetId == "custom" { Text("Custom").tag("custom") }
+            }.pickerStyle(.segmented).labelsHidden()
+            HStack {
+                Text("Re-check after a pause of")
+                Slider(value: $model.perf.idleSecs, in: 0.2...3, step: 0.1)
+                Text(String(format: "%.1f s", model.perf.idleSecs)).monospacedDigit().frame(width: 44, alignment: .trailing)
+            }
+            HStack {
+                Toggle("Also re-check while typing, every", isOn: Binding(
+                    get: { model.perf.everyWords > 0 }, set: { model.perf.everyWords = $0 ? 3 : 0 }))
+                Stepper("\(max(1, model.perf.everyWords)) words", value: Binding(
+                    get: { max(1, model.perf.everyWords) }, set: { model.perf.everyWords = $0 }), in: 1...10)
+                    .disabled(model.perf.everyWords == 0)
+            }
+            Picker("Check", selection: $model.perf.wholeField) {
+                Text("Sentences near the cursor").tag(false)
+                Text("The whole text box").tag(true)
+            }
+            Toggle("Let words near a sentence's end see the next sentence too", isOn: $model.perf.nextSentence)
+            HStack {
+                Text("Text before each sentence")
+                Slider(value: Binding(get: { Double(model.perf.leftChars) }, set: { model.perf.leftChars = Int($0) }), in: 80...400, step: 20)
+                Text("\(model.perf.leftChars) chars").monospacedDigit().frame(width: 70, alignment: .trailing)
+            }
+            Text("The model only reads about the last 64 tokens (roughly 250 characters) before a word, so more than that doesn't make a single check smarter. Heavier settings check more often and more of the text, using more CPU. Checks never hold up typing: the next key cancels them.")
+                .font(.footnote).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+            Text(model.usage).font(.system(size: 11, design: .monospaced)).fixedSize(horizontal: false, vertical: true)
+        }
     }
 }
 

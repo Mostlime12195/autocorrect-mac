@@ -67,6 +67,9 @@ final class TextLayer {
     private var dSource = "none yet"
     private var dWritePath = "none yet"
     private var dPick = "none yet"
+    private var wordsSincePass = 0
+    let meter = PerfMeter()
+    private var cpuTimer: DispatchSourceTimer?
     private var paramsFor: AXField?
     private let log = Logger(subsystem: "dev.mostlime.autocorrect-mac", category: "text")
 
@@ -519,11 +522,18 @@ final class TextLayer {
         engine.correctWord(input, prev: pw, merge: merge) { [weak self] r, inLex in
             self?.q.async { self?.resolved(f, word, sep, start, seq, r, inLex, used) }
         }
+        // Performance: also re-check the sentence every N words (queued after this word's own correction)
+        let n = settings.perf.everyWords
+        if n > 0 {
+            wordsSincePass += 1
+            if wordsSincePass >= n { wordsSincePass = 0; q.async { self.idle(seq, typing: true) } }
+        }
     }
 
     private func resolved(_ f: AXField, _ word: String, _ sep: String, _ start: Int, _ seq: Int, _ r: WordResult?, _ inLex: Bool,
                           _ used: PrevInfo?) {
         guard let r = r, f.same(field), usableField() != nil else { return }
+        meter.record(.wordEnd, ms: r.ms, at: Date().timeIntervalSince1970)
         let o = WordOutcome(r, typedOOV: !inLex)
         let userWord = engine.user.has(word) || ignored.contains(word.lowercased())
         let d = Policy.boundary(o, mode: settings.mode, hasPrev: used != nil, prevOut: used?.out, userWord: userWord,
@@ -733,15 +743,19 @@ final class TextLayer {
         idleWork?.cancel()
         let w = DispatchWorkItem { [weak self] in self?.idle(seq) }
         idleWork = w
-        q.asyncAfter(deadline: .now() + Self.IDLE_SECS, execute: w)
+        q.asyncAfter(deadline: .now() + settings.perf.idleSecs, execute: w)
     }
 
-    private func idle(_ seq: Int) {
+    /// typing: the every-N-words re-check (current sentence only, never writes; the next key cancels it)
+    private func idle(_ seq: Int, typing: Bool = false) {
         guard seqNow == seq else { return }
+        let perf = settings.perf
         guard let f = usableField() else { noteIdle("skipped: \(notUsableWhy())"); return }
-        guard let snap = f.snapshot(), snap.selLength == 0 else { noteIdle("skipped: field text unreadable or a selection"); return }
+        guard let snap = f.snapshot() else { noteIdle("skipped: couldn't read the field's text"); return }
+        guard snap.selLength == 0 else { noteIdle("skipped: \(snap.selLength) characters are selected"); return }
         let caretRel = snap.caret - snap.base
-        let lo = max(0, caretRel - Self.IDLE_CHARS), hi = min(snap.ns.length, caretRel + Self.IDLE_CHARS)
+        let lo = perf.wholeField && !typing ? 0 : max(0, caretRel - Self.IDLE_CHARS)
+        let hi = perf.wholeField && !typing ? snap.ns.length : min(snap.ns.length, caretRel + Self.IDLE_CHARS)
         guard hi > lo else { return }
         let text = snap.ns.substring(with: NSRange(location: lo, length: hi - lo))
         let winBase = snap.base + lo
@@ -752,24 +766,35 @@ final class TextLayer {
         for c in chars { offs.append(u); u += c.utf16.count }
         offs.append(u)
         let caretChar = offs.firstIndex { $0 >= caretRel - lo } ?? chars.count
-        var todo: [(range: Range<Int>, key: String, left: String)] = []
-        for r in SentenceCheck.split(text) {
-            let left = String(chars[max(0, r.lowerBound - Self.IDLE_LEFT)..<r.lowerBound])
-            let key = left + "\u{1}" + String(chars[r])
-            if sentenceCache[key] == nil { todo.append((r, key, left)) }
+        var todo: [(range: Range<Int>, key: String, left: String, after: String)] = []
+        let splits = SentenceCheck.split(text)
+        for (k, r) in splits.enumerated() {
+            let left = String(chars[max(0, r.lowerBound - perf.leftChars)..<r.lowerBound])
+            // the next sentence (and the space before it), as right context for the words near this one's end
+            let after = perf.nextSentence && k + 1 < splits.count ? String(chars[r.upperBound..<splits[k + 1].upperBound]) : ""
+            let key = left + "\u{1}" + String(chars[r]) + "\u{2}" + after
+            if sentenceCache[key] == nil { todo.append((r, key, left, after)) }
         }
         guard !todo.isEmpty else { noteIdle("nothing new to check"); return }
         // nearest to the caret first
         todo.sort { dist($0.range, caretChar) < dist($1.range, caretChar) }
-        let batch = Array(todo.prefix(Self.IDLE_SENTENCES))
-        let reqs = batch.map { SentenceReq(left: $0.left, sentence: String(chars[$0.range])) }
+        if typing {
+            // only the sentence being typed (the one holding the caret, if it changed)
+            todo = todo.filter { $0.range.lowerBound <= caretChar && caretChar <= $0.range.upperBound }
+            guard !todo.isEmpty else { return }
+        }
+        let batch = perf.wholeField && !typing ? todo : Array(todo.prefix(typing ? 1 : Self.IDLE_SENTENCES))
+        let reqs = batch.map { SentenceReq(left: $0.left, sentence: String(chars[$0.range]), after: $0.after) }
         let more = todo.count > batch.count
+        let t0 = Date()
         engine.checkSentences(reqs, cancelled: { [weak self] in self?.seqNow != seq }) { [weak self] res in
+            let ms = Date().timeIntervalSince(t0) * 1000
+            if res == nil { self?.meter.cancelled(at: Date().timeIntervalSince1970) } else { self?.meter.record(.pass, ms: ms, at: Date().timeIntervalSince1970) }
             self?.q.async {
                 guard let self = self else { return }
                 guard let res = res, self.seqNow == seq, f.same(self.field), let s2 = f.snapshot(),
                       s2.base == snap.base, s2.caret == snap.caret, s2.text == snap.text else { self.noteIdle("dropped: typing resumed or the text changed"); return }
-                self.noteIdle("checked \(res.count) sentence(s), \(res.reduce(0) { $0 + $1.count }) flagged")
+                self.noteIdle("\(typing ? "while typing: " : "")checked \(res.count) sentence(s) in \(Int(ms)) ms, \(res.reduce(0) { $0 + $1.count }) flagged")
                 var applies: [(range: NSRange, from: String, to: String)] = []
                 for (j, fixes) in res.enumerated() {
                     let b = batch[j]
@@ -786,7 +811,8 @@ final class TextLayer {
                         let userWord = self.engine.user.has(fx.from) || self.ignored.contains(fx.from.lowercased())
                         switch Policy.idle(gap: fx.gap, spelling: spelling, mode: self.settings.mode,
                                            inCurrentSentence: current && a + len <= snap.caret, userWord: userWord) {
-                        case .apply: applies.append((NSRange(location: a, length: len), fx.from, fx.to))
+                        case .apply where !typing: applies.append((NSRange(location: a, length: len), fx.from, fx.to))
+                        case .apply: fallthrough   // no text changes while typing: underline it instead
                         case .flag:
                             if !self.tracker.has(start: a, word: fx.from) {
                                 self.tracker.add(start: a, word: fx.from, fixes: fx.fixes, spelling: spelling, fromIdle: true)
@@ -809,7 +835,7 @@ final class TextLayer {
                                                out: ap.to, sep: "", pillId: pid, until: Date().addingTimeInterval(Self.REVERT_SECS)))
                 }
                 self.pushOverlay()
-                if more { self.scheduleIdle(seq) }
+                if more && !typing { self.scheduleIdle(seq) }
             }
         }
     }
@@ -900,6 +926,35 @@ final class TextLayer {
         pushOverlay()
     }
 
+    // MARK: usage meter
+
+    /// CPU time every 5 s, for the meter's CPU %
+    func startCpuSampling() {
+        let t = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        t.schedule(deadline: .now(), repeating: 5)
+        t.setEventHandler { [weak self] in
+            var u = rusage()
+            getrusage(RUSAGE_SELF, &u)
+            let s = Double(u.ru_utime.tv_sec) + Double(u.ru_utime.tv_usec) / 1e6 + Double(u.ru_stime.tv_sec) + Double(u.ru_stime.tv_usec) / 1e6
+            self?.meter.cpuSample(seconds: s, at: Date().timeIntervalSince1970)
+        }
+        t.resume()
+        cpuTimer = t
+    }
+
+    /// any thread
+    func usage() -> String {
+        let p = settings.perf
+        let s = meter.summary(now: Date().timeIntervalSince1970, pauseSecs: p.idleSecs, backlog: engine.pending)
+        func st(_ x: PerfMeter.Stat) -> String { x.count == 0 ? "none" : String(format: "%d, avg %.0f ms, p95 %.0f ms", x.count, x.avgMs, x.p95Ms) }
+        let cpu = s.cpuPercent.map { String(format: "%.1f%%", $0) } ?? "measuring…"
+        return [
+            "Last minute: word ends \(st(s.wordEnds)); re-checks \(st(s.passes)); \(s.cancelled) re-check(s) cut short by typing",
+            "Keylime CPU: \(cpu) of one core; energy: \(s.energy)",
+            s.behind.map { "⚠️ Falling behind: \($0). Try a longer pause or a lighter preset." } ?? "Keeping up.",
+        ].joined(separator: "\n")
+    }
+
     // MARK: diagnostics
 
     /// any thread
@@ -925,6 +980,8 @@ final class TextLayer {
             "Last click: \(dClick)",
             "Write path: \(dWritePath)",
             "Last pick: \(dPick)",
+            "Performance: \(settings.perf.presetId), pause \(settings.perf.idleSecs) s, every \(settings.perf.everyWords) words, " +
+                "\(settings.perf.wholeField ? "whole text box" : "near the caret"), left \(settings.perf.leftChars) chars, next sentence \(settings.perf.nextSentence)",
         ].joined(separator: "\n")
     }
 
