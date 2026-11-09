@@ -58,24 +58,35 @@ public final class MarkTracker {
     /// Re-locate every mark in `text`, which is the field's text from UTF-16 offset `base`: a mark whose word is still at
     /// its offset (as a whole word) stays; one found nearby moves there; one outside the text or gone is dropped.
     /// -> ids dropped
+    /// marks not found in the last reconcile, since when (they stay for `grace` seconds: some apps briefly report
+    /// stale or empty text while they re-render)
+    public private(set) var missingSince: [Int: Double] = [:]
+
     @discardableResult
-    public func reconcile(_ text: String, base: Int = 0) -> [Int] {
+    public func reconcile(_ text: String, base: Int = 0, now: Double = 0, grace: Double = 0) -> [Int] {
         let u = Array(text.utf16)
         var dropped: [Int] = []
         var kept: [Mark] = []
         for var m in marks {
             let w = Array(m.word.utf16)
             let rel = m.start - base
-            if rel >= 0 && Self.wholeWord(u, w, at: rel) { kept.append(m); continue }
+            if rel >= 0 && Self.wholeWord(u, w, at: rel) { kept.append(m); missingSince[m.id] = nil; continue }
             if let at = Self.nearest(u, w, around: rel, slack: Self.SLACK) {
                 m.start = base + at
-                if !kept.contains(where: { $0.start < m.end && m.start < $0.end }) { kept.append(m); continue }
+                if !kept.contains(where: { $0.start < m.end && m.start < $0.end }) { kept.append(m); missingSince[m.id] = nil; continue }
             }
+            if grace > 0 {
+                let since = missingSince[m.id] ?? now
+                if now - since < grace { missingSince[m.id] = since; kept.append(m); continue }
+            }
+            missingSince[m.id] = nil
             dropped.append(m.id)
         }
         marks = kept
         return dropped
     }
+
+    public func isMissing(_ id: Int) -> Bool { missingSince[id] != nil }
 
     public static func isWordUnit(_ c: UInt16) -> Bool {
         if (65...90).contains(c) || (97...122).contains(c) || (48...57).contains(c) || c == 39 || c == 0x2019 { return true }

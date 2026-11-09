@@ -58,3 +58,25 @@ final class MarkTrackerTests: XCTestCase {
         XCTAssertTrue(t.isEmpty)
     }
 }
+
+final class MarkGraceTests: XCTestCase {
+    func testStaleTextDoesNotDropMarksRightAway() {
+        let t = MarkTracker()
+        let m = t.add(start: 4, word: "teh", fixes: ["the"], spelling: true)
+        // the app re-renders and briefly reports empty text
+        XCTAssertEqual(t.reconcile("", now: 10, grace: 0.8), [])
+        XCTAssertTrue(t.isMissing(m.id))
+        XCTAssertEqual(t.reconcile("see teh cat", now: 10.3, grace: 0.8), [])
+        XCTAssertFalse(t.isMissing(m.id))
+        XCTAssertEqual(t.marks.count, 1)
+    }
+
+    func testAnEditedWordGoesAfterTheGrace() {
+        let t = MarkTracker()
+        let m = t.add(start: 4, word: "teh", fixes: ["the"], spelling: true)
+        XCTAssertEqual(t.reconcile("see the cat", now: 0, grace: 0.8), [])
+        XCTAssertEqual(t.reconcile("see the cat", now: 0.5, grace: 0.8), [])
+        XCTAssertEqual(t.reconcile("see the cat", now: 0.9, grace: 0.8), [m.id])
+        XCTAssertTrue(t.isEmpty)
+    }
+}
