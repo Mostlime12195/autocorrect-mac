@@ -25,7 +25,6 @@ final class TextLayer {
     static let PREVIEW_SECS = 0.25
     /// a correction can be reverted by clicking it for this long
     static let REVERT_SECS = 4.0
-    static let CTX_CHARS = 400
     static let IDLE_CHARS = 2000
     static let IDLE_LEFT = 200
     static let IDLE_SENTENCES = 6
@@ -481,6 +480,13 @@ final class TextLayer {
         return s.sub(NSRange(location: a, length: at - a)) ?? ""
     }
 
+    /// the model's left context for text before `at`: as many characters as the context-length setting needs, from a
+    /// start that only moves every 1024 characters (so the scorer's state cache keeps extending the same prefix)
+    private func leftText(_ s: AXField.Snapshot, _ at: Int) -> String {
+        let a = max(s.base, TypingCore.contextStart(at, chars: settings.perf.leftChars))
+        return s.sub(NSRange(location: a, length: at - a)) ?? ""
+    }
+
     private func charBefore(_ s: AXField.Snapshot, _ at: Int) -> Character? {
         guard at > s.base, let u = s.unit(at - 1), let sc = Unicode.Scalar(u) else { return nil }
         return Character(sc)
@@ -506,14 +512,14 @@ final class TextLayer {
         guard start == 0 || TypingCore.isOpener(charBefore(snap, start)) else {
             prev = nil; noteWord("skipped: the word follows \(charBefore(snap, start).map { "U+" + String($0.unicodeScalars.first!.value, radix: 16, uppercase: true) } ?? "?"), not a space"); return
         }
-        let (left, sp) = TypingCore.splitLeft(textBefore(snap, start, Self.CTX_CHARS))
+        let (left, sp) = TypingCore.splitLeft(leftText(snap, start))
         let input = WordInput(typed: word, left: left, sep: sp)
         var pw: PrevWord? = nil
         var merge: MergeInput? = nil
         var used: PrevInfo? = nil
         if let p = prev, !sp.contains("\n"), p.start + p.out.utf16.count + sp.utf16.count == start, left.hasSuffix(p.out),
            snap.sub(NSRange(location: p.start, length: p.out.utf16.count)) == p.out {
-            let (lp, sepp) = TypingCore.splitLeft(textBefore(snap, p.start, Self.CTX_CHARS))
+            let (lp, sepp) = TypingCore.splitLeft(leftText(snap, p.start))
             pw = PrevWord(slot: p.slot, idx: p.idx, left: lp, sep: sepp, lmScored: p.lmScored, margin: p.margin, scores: p.scores)
             merge = MergeInput(prevTyped: p.typed)
             used = p
@@ -714,7 +720,7 @@ final class TextLayer {
         guard a < snap.caret, let word = snap.sub(NSRange(location: a, length: snap.caret - a)), TypingCore.correctable(word),
               a == 0 || TypingCore.isOpener(charBefore(snap, a)) else { return }
         if engine.user.has(word) || ignored.contains(word.lowercased()) { return }
-        let (left, sp) = TypingCore.splitLeft(textBefore(snap, a, Self.CTX_CHARS))
+        let (left, sp) = TypingCore.splitLeft(leftText(snap, a))
         engine.correctWord(WordInput(typed: word, left: left, sep: sp), prev: nil, merge: nil) { [weak self] r, inLex in
             self?.q.async {
                 guard let self = self, let r = r, self.seqNow == seq, f.same(self.field) else { return }
@@ -981,7 +987,7 @@ final class TextLayer {
             "Write path: \(dWritePath)",
             "Last pick: \(dPick)",
             "Performance: \(settings.perf.presetId), pause \(settings.perf.idleSecs) s, every \(settings.perf.everyWords) words, " +
-                "\(settings.perf.wholeField ? "whole text box" : "near the caret"), left \(settings.perf.leftChars) chars, next sentence \(settings.perf.nextSentence)",
+                "\(settings.perf.wholeField ? "whole text box" : "near the caret"), context \(settings.perf.ctxTokens) tokens (\(engine.contextInfo)), next sentence \(settings.perf.nextSentence)",
         ].joined(separator: "\n")
     }
 

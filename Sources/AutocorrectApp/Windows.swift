@@ -52,7 +52,8 @@ final class SettingsModel: ObservableObject {
     @Published var preview = Settings.shared.preview { didSet { Settings.shared.preview = preview } }
     @Published var checkUpdates = Settings.shared.checkUpdates { didSet { Settings.shared.checkUpdates = checkUpdates } }
     @Published var systemAutocorrect = SystemAutocorrect.isOn
-    @Published var perf = Settings.shared.perf { didSet { if perf != oldValue { Settings.shared.perf = perf } } }
+    @Published var perf = Settings.shared.perf { didSet { if perf != oldValue { Settings.shared.perf = perf; onPerf?(perf) } } }
+    var onPerf: ((Settings.Perf) -> Void)?
     @Published var usage = ""
     var onChange: (() -> Void)?
     var openLists: (() -> Void)?
@@ -181,11 +182,11 @@ struct PerformanceView: View {
             }
             Toggle("Let words near a sentence's end see the next sentence too", isOn: $model.perf.nextSentence)
             HStack {
-                Text("Text before each sentence")
-                Slider(value: Binding(get: { Double(model.perf.leftChars) }, set: { model.perf.leftChars = Int($0) }), in: 80...400, step: 20)
-                Text("\(model.perf.leftChars) chars").monospacedDigit().frame(width: 70, alignment: .trailing)
+                Text("Context the model reads")
+                Slider(value: Binding(get: { Double(model.perf.ctxTokens) }, set: { model.perf.ctxTokens = Int($0) }), in: 64...1024, step: 64)
+                Text("\(model.perf.ctxTokens) tokens").monospacedDigit().frame(width: 84, alignment: .trailing)
             }
-            Text("The model only reads about the last 64 tokens (roughly 250 characters) before a word, so more than that doesn't make a single check smarter. Heavier settings check more often and more of the text, using more CPU. Checks never hold up typing: the next key cancels them.")
+            Text("Tokens of text before each word the model takes into account (about \(model.perf.ctxTokens * 4) characters). The m2 model was trained on 1024; more context costs more time per word, shown below. Heavier settings also check more often and more of the text. Checks never hold up typing: the next key cancels them.")
                 .font(.footnote).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
             Text(model.usage).font(.system(size: 11, design: .monospaced)).fixedSize(horizontal: false, vertical: true)
         }

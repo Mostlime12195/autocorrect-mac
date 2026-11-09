@@ -67,7 +67,16 @@ public final class TypingCore {
     /// user penalty lookup for capI (typed, chosen) -> nats
     public var penalty: (String, String) -> Double = { _, _ in 0 }
 
-    public static let CTX_CHARS = 400
+    /// characters of text kept before the word (the app sets it from the context-length setting, ~5 per token)
+    public static var CTX_CHARS = 400
+    /// the stored context is trimmed in steps this big, so its start (and the model's context prefix) stays put
+    static let CTX_SLACK = 1024
+
+    /// Where the left context for text before `at` starts: at least `chars` back, on a multiple of `step`, so the
+    /// start only moves every `step` characters (successive words share a prefix, which the scorer's cache reuses).
+    public static func contextStart(_ at: Int, chars: Int, step: Int = 1024) -> Int {
+        at <= chars ? 0 : ((at - chars) / step) * step
+    }
     public static let MAX_WORD = 32
     public static let SEPARATORS: Set<Character> = [" ", "\n", ".", ",", "!", "?", ";", ":", ")", "\""]
     /// what may come right before a correctable word (no @handles, #tags, paths, mid-token words)
@@ -117,7 +126,7 @@ public final class TypingCore {
 
     private func append(_ s: String) {
         context += s
-        if context.count > Self.CTX_CHARS + 100 { context = String(context.suffix(Self.CTX_CHARS)) }
+        if context.count > Self.CTX_CHARS + Self.CTX_SLACK { context = String(context.suffix(Self.CTX_CHARS)) }
     }
 
     /// One key. canCorrect: the app allows corrections right now (enabled, model ready, app not excluded, no secure input).

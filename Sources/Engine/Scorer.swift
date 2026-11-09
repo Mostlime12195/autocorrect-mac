@@ -164,6 +164,20 @@ public final class StepModel {
     /// batched path below is used. NeuralScorer checks this to pick the path once the tree runner lands.
     public var isTree: Bool { session.inputNames.contains("tree_mask") }
 
+    /// The highest token position the graph accepts (its rope table is sized to the model's max_seq; positions past it
+    /// fail). Probed with one-token runs; `limit` caps the search.
+    public func maxPosition(limit: Int = 4096) -> Int {
+        func ok(_ p: Int) -> Bool { (try? run([[0]], pos0: p, state: fresh(), keepState: false)) != nil }
+        guard ok(63) else { return 0 }
+        if ok(limit) { return limit }
+        var lo = 63, hi = limit
+        while hi - lo > 1 {
+            let mid = (lo + hi) / 2
+            if ok(mid) { lo = mid } else { hi = mid }
+        }
+        return lo
+    }
+
     func fresh() -> LmState {
         var d: [String: [Float]] = [:], s: [String: [Int64]] = [:]
         for n in meta.stateNames {
@@ -230,6 +244,26 @@ public final class NeuralScorer: LmScorer {
     public private(set) var tokensRun = 0
     public private(set) var calls = 0
     public var lastCtxTokens = 0
+    /// left-context tokens the model sees (MAX_CTX = the original 64)
+    public var maxCtx = MAX_CTX
+    /// the graph's highest position (StepModel.maxPosition); the context leaves room under it for what's scored
+    public var maxPos: Int?
+    /// positions kept free for the scored continuation (candidate + right context)
+    public static let TARGET_ROOM = 64
+
+    public var effectiveMaxCtx: Int {
+        guard let mp = maxPos else { return maxCtx }
+        return max(MAX_CTX, min(maxCtx, mp + 1 - Self.TARGET_ROOM))
+    }
+
+    /// how many of `total` tokens to keep, at most `keep`. Past the original 64, the cut moves in 64-token steps so
+    /// successive words share a context prefix (the state cache extends it instead of re-running everything).
+    private func tailLen(_ total: Int, _ keep: Int) -> Int {
+        if total <= keep { return total }
+        if keep <= MAX_CTX { return keep }
+        let chunk = 64
+        return total - ((total - keep + chunk - 1) / chunk) * chunk
+    }
 
     public init(tok: SPTokenizer, step: StepModel, styleId: Int? = nil, cacheSize: Int = 16) {
         self.tok = tok; self.step = step; self.styleId = styleId; self.cacheSize = cacheSize
@@ -238,10 +272,11 @@ public final class NeuralScorer: LmScorer {
     private func enc(_ s: String) -> [Int] { [tok.eosId] + (s.isEmpty ? [] : tok.encode(s)) }
 
     private func clip(_ ctx: [Int]) -> [Int] {
-        guard let sid = styleId else { return ctx.count > MAX_CTX ? Array(ctx[(ctx.count - MAX_CTX)...]) : ctx }
+        let lim = effectiveMaxCtx
+        guard let sid = styleId else { return ctx.count > lim ? Array(ctx[(ctx.count - tailLen(ctx.count, lim))...]) : ctx }
         let body = Array(ctx.dropFirst())
-        let keep = MAX_CTX - 2
-        let tail = body.count > keep ? Array(body[(body.count - keep)...]) : body
+        let keep = lim - 2
+        let tail = body.count > keep ? Array(body[(body.count - tailLen(body.count, keep))...]) : body
         return [tok.eosId, sid] + tail
     }
 

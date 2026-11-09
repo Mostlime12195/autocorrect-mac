@@ -49,6 +49,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusModel.testUnderline = { [weak self] in self?.showTestUnderline() }
         settingsModel.openLists = { [weak self] in self?.openLists() }
         settingsModel.usageSource = { [weak self] in self?.layer.usage() ?? "" }
+        let applyPerf: (Settings.Perf) -> Void = { [weak self] p in
+            TypingCore.CTX_CHARS = p.leftChars
+            self?.engine.setContext(p.ctxTokens)
+        }
+        settingsModel.onPerf = applyPerf
+        applyPerf(settings.perf)
         layer.startCpuSampling()
         Updater.shared.onChange = { [weak self] in self?.refreshIcon() }
 

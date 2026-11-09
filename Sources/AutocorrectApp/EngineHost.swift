@@ -28,6 +28,24 @@ final class EngineHost {
     var lastMs: Double { stateLock.lock(); defer { stateLock.unlock() }; return _lastMs }
     /// jobs queued or running on the engine queue (the usage meter's backlog)
     private var _pending = 0
+    private var _maxPos = 0
+    private var _ctx = MAX_CTX
+    /// "graph limit 1023, using 960": what the context setting actually gives
+    var contextInfo: String {
+        stateLock.lock(); defer { stateLock.unlock() }
+        if _maxPos == 0 { return "graph not probed yet" }
+        return "graph accepts positions up to \(_maxPos), using \(min(_ctx, _maxPos + 1 - NeuralScorer.TARGET_ROOM))"
+    }
+
+    /// context-length setting (tokens): applied on the engine queue, cache dropped
+    func setContext(_ tokens: Int) {
+        stateLock.lock(); _ctx = tokens; stateLock.unlock()
+        queue.async {
+            guard let sc = self.scorer, sc.maxCtx != tokens else { return }
+            sc.maxCtx = tokens
+            sc.clearCache()
+        }
+    }
     var pending: Int { stateLock.lock(); defer { stateLock.unlock() }; return _pending }
     private func begin() { stateLock.lock(); _pending += 1; stateLock.unlock() }
     private func end() { stateLock.lock(); _pending -= 1; stateLock.unlock() }
@@ -70,6 +88,11 @@ final class EngineHost {
                 let threads = min(4, max(1, ProcessInfo.processInfo.activeProcessorCount / 2))
                 let step = try StepModel.open(path: graph.path, meta: spec.meta, threads: threads)
                 let sc = NeuralScorer(tok: tok, step: step, styleId: spec.styleToken)
+                // how far its positions go (rope table = max_seq): the context setting is clamped under it
+                let mp = step.maxPosition()
+                sc.maxPos = mp
+                self.stateLock.lock(); self._maxPos = mp; sc.maxCtx = self._ctx; self.stateLock.unlock()
+                self.log.info("graph accepts positions up to \(mp)")
                 // warm-up: the first ORT run allocates; do it before the first word
                 _ = try sc.score([LmReq("hello there", " friend"), LmReq("hello there", " fiend")])
                 sc.clearCache()

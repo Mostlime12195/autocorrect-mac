@@ -71,14 +71,17 @@ final class Settings {
         var everyWords: Int
         /// re-check the whole text box (else: sentences near the caret, a few per pass)
         var wholeField: Bool
-        /// characters of text before each sentence given to the model
-        var leftChars: Int
+        /// tokens of left context the model reads (64 = the original; m2 was trained on 1024)
+        var ctxTokens: Int
         /// words near a sentence's end also see the next sentence
         var nextSentence: Bool
 
-        static let battery = Perf(idleSecs: 2.0, everyWords: 0, wholeField: false, leftChars: 120, nextSentence: false)
-        static let balanced = Perf(idleSecs: 1.0, everyWords: 0, wholeField: false, leftChars: 200, nextSentence: false)
-        static let max = Perf(idleSecs: 0.3, everyWords: 2, wholeField: true, leftChars: 300, nextSentence: true)
+        /// characters of text handed over for that many tokens (~5 per token, with room)
+        var leftChars: Int { Swift.max(320, ctxTokens * 5) }
+
+        static let battery = Perf(idleSecs: 2.0, everyWords: 0, wholeField: false, ctxTokens: 64, nextSentence: false)
+        static let balanced = Perf(idleSecs: 1.0, everyWords: 0, wholeField: false, ctxTokens: 1024, nextSentence: false)
+        static let max = Perf(idleSecs: 0.3, everyWords: 2, wholeField: true, ctxTokens: 1024, nextSentence: true)
         static let presets: [(String, String, Perf)] = [("battery", "Battery saver", battery), ("balanced", "Balanced", balanced), ("max", "Max", max)]
 
         var presetId: String { Self.presets.first { $0.2 == self }?.0 ?? "custom" }
@@ -89,14 +92,14 @@ final class Settings {
             Perf(idleSecs: min(3, max(0.2, d.object(forKey: "perfIdleSecs") as? Double ?? 1.0)),
                  everyWords: min(10, max(0, d.object(forKey: "perfEveryWords") as? Int ?? 0)),
                  wholeField: d.bool(forKey: "perfWholeField"),
-                 leftChars: min(400, max(80, d.object(forKey: "perfLeftChars") as? Int ?? 200)),
+                 ctxTokens: min(1024, max(64, d.object(forKey: "perfCtxTokens") as? Int ?? Perf.balanced.ctxTokens)),
                  nextSentence: d.bool(forKey: "perfNextSentence"))
         }
         set {
             d.set(newValue.idleSecs, forKey: "perfIdleSecs")
             d.set(newValue.everyWords, forKey: "perfEveryWords")
             d.set(newValue.wholeField, forKey: "perfWholeField")
-            d.set(newValue.leftChars, forKey: "perfLeftChars")
+            d.set(newValue.ctxTokens, forKey: "perfCtxTokens")
             d.set(newValue.nextSentence, forKey: "perfNextSentence")
         }
     }
