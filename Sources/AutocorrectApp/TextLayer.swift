@@ -159,6 +159,7 @@ final class TextLayer {
                 AXField.enableAccessibility(pid: pid, bundleId: bid)
             }
             self.switchField(nil)
+            self.setMode(.unknown)
             // Electron builds its tree after AXManualAccessibility: look a little later
             self.q.asyncAfter(deadline: .now() + 0.3) { self.probe(force: true) }
         }
@@ -217,11 +218,17 @@ final class TextLayer {
     private func probe(force: Bool) {
         if !force && Date().timeIntervalSince(lastProbe) < 3 { return }
         lastProbe = Date()
-        let f = AXField.focused()
+        var f = AXField.focused()
+        if f?.pid == ProcessInfo.processInfo.processIdentifier { f = nil; switchField(nil); setMode(.unknown); return }   // our own windows
         if let f = f, f.same(field) { updateMode(f); return }
         switchField(f)
     }
 
+    private func setMode(_ m: InputController.FieldMode) {
+        if m != mode { mode = m; input.setFieldMode(m) }
+    }
+
+    /// nil: no focused element we can see (0.1 behaviour: keystroke fallback)
     private func updateMode(_ f: AXField?) {
         var m = InputController.FieldMode.keys
         if let f = f {
@@ -229,7 +236,7 @@ final class TextLayer {
             else if noWrite.contains(where: { CFEqual($0, f.el) }) { m = .keys }
             else if f.snapshot() != nil { m = .ax }
         }
-        if m != mode { mode = m; input.setFieldMode(m) }
+        setMode(m)
     }
 
     private func switchField(_ f: AXField?) {
@@ -310,8 +317,16 @@ final class TextLayer {
 
     private func boundary(_ word: String, _ sep: String, _ seq: Int) {
         if field == nil || mode == .unknown { probe(force: true) }
-        guard TypingCore.correctable(word), let f = usableField(), let snap = f.snapshot(), snap.selLength == 0 else { prev = nil; return }
-        guard let start = locate(word, snap) else { prev = nil; input.debugNote("ax: \"\(word)\" not found before the caret"); return }
+        guard TypingCore.correctable(word), let f = usableField(), var snap = f.snapshot(), snap.selLength == 0 else { prev = nil; return }
+        var found = locate(word, snap)
+        // Chromium / Electron update their accessibility text a little after the key
+        for _ in 0..<3 where found == nil {
+            usleep(30_000)
+            guard let s2 = f.snapshot(), s2.selLength == 0 else { break }
+            snap = s2
+            found = locate(word, s2)
+        }
+        guard let start = found else { prev = nil; input.debugNote("ax: \"\(word)\" not found before the caret"); return }
         if let k = keepOnce, k.start == start, k.word == word { keepOnce = nil; prev = nil; return }
         guard start == 0 || TypingCore.isOpener(charBefore(snap, start)) else { prev = nil; return }
         let (left, sp) = TypingCore.splitLeft(textBefore(snap, start, Self.CTX_CHARS))
@@ -649,6 +664,9 @@ final class TextLayer {
     /// re-locate marks in the field's current text and re-query where they are on screen
     private func refresh() {
         let now = Date()
+        if settings.mode == .off || settings.isExcluded(input.frontmostBundleId) {
+            tracker.removeAll(); pills.removeAll(); recents.removeAll()
+        }
         pills.removeAll { $0.until < now }
         let lastId = recents.last?.pillId
         recents.removeAll { $0.until < now && $0.pillId != lastId }

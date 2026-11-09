@@ -122,7 +122,14 @@ final class AXField {
     /// verify by reading it again. unsupported: nothing changed and the field won't take AX writes (safe to fall back);
     /// changed: the text isn't what we expected (leave it alone).
     func replace(_ r: NSRange, old: String, new: String) -> Write {
-        guard let sel = selection else { return .unsupported }
+        // keys already delivered may still be landing (Chromium updates its tree late): wait for a stable caret
+        guard var sel = selection else { return .unsupported }
+        for _ in 0..<4 {
+            usleep(8_000)
+            guard let s2 = selection else { return .unsupported }
+            if s2 == sel { break }
+            sel = s2
+        }
         guard let cur = read(r) else { return .unsupported }
         guard cur == old else { return .changed }
         guard setSelection(r) else { return .unsupported }
@@ -133,14 +140,17 @@ final class AXField {
         guard setSelectedText(new) else { setSelection(sel); return .unsupported }
         let nr = NSRange(location: r.location, length: (new as NSString).length)
         var landed = read(nr) == new
-        if !landed { usleep(40_000); landed = read(nr) == new }
+        for _ in 0..<3 where !landed { usleep(40_000); landed = read(nr) == new }
         var caret = sel
         if sel.location >= NSMaxRange(r) {
             caret.location += nr.length - r.length
         } else if sel.location > r.location {
             caret = NSRange(location: NSMaxRange(nr), length: 0)
         }
-        if landed { setSelection(caret); return .ok }
+        if landed {
+            if !setSelection(caret) || selection != caret { usleep(15_000); setSelection(caret) }
+            return .ok
+        }
         if read(r) == old { setSelection(sel); return .unsupported }
         return .changed
     }
