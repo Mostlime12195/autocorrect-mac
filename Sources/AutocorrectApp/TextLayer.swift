@@ -42,6 +42,8 @@ final class TextLayer {
     private var popoverRect: CGRect?
     private var previewShown = false
     private var frontPid: pid_t = 0
+    /// when the last real key was seen (writes wait for the keys before them to land)
+    private var lastKeyAt = Date.distantPast
     // diagnostics (status window / Copy Diagnostics)
     private var dPath = "unknown"
     private var dWhy = "nothing focused yet"
@@ -132,6 +134,7 @@ final class TextLayer {
         keySeq += 1
         let seq = keySeq
         undoArmed = nil
+        lastKeyAt = Date()
         let inPopover = click.map { popoverRect?.contains($0) ?? false } ?? false
         lock.unlock()
         if inPopover { return }
@@ -242,6 +245,8 @@ final class TextLayer {
             closePopover()
         }
         if mode != .ax && click == nil { probe(force: false) }
+        // fixes waiting for a safe moment: right after a separator, or after a pause
+        if case .boundary = s { schedulePending(after: 0.06) } else { schedulePending(after: 0.6) }
         scheduleIdle(seq)
         scheduleRefresh(after: 0.05)
     }
@@ -568,43 +573,131 @@ final class TextLayer {
                 newText = merged ? out : prevNew! + String(mid.dropFirst(p.out.count)) + out
             }
             let range = NSRange(location: spanStart, length: (oldText as NSString).length)
-            let res = write(f, range, old: oldText, new: newText)
-            noteWord(String(format: "fixed (margin %.1f): write ", o.margin) + "\(res)")
-            switch res {
-            case .ok:
-                let newLen = (newText as NSString).length
-                edited(at: spanStart, oldLen: range.length, newLen: newLen)
-                let pid = addPill(NSRange(location: spanStart, length: newLen), newText)
-                recents.append(Recent(start: spanStart, newText: newText, oldText: oldText, word: word, learnTyped: merged ? oldText : word,
-                                      out: out, sep: sep, pillId: pid, until: Date().addingTimeInterval(Self.REVERT_SECS)))
-                if recents.count > 6 { recents.removeFirst() }
-                // backspace undoes it while nothing else was typed after the separator
-                lock.lock(); if keySeq == seq { undoArmed = seq }; lock.unlock()
-                if !merged { setPrev(out, spanStart + newLen - (out as NSString).length) }
-                pushOverlay()
-            case .unsupported:
-                writesFailed(f)
-            case .changed:
-                break
-            }
+            prev = nil
+            let margin = o.margin
+            // written when it's safe: never into the word being typed; mid-word it waits for the separator / a pause
+            fix(PendingFix(f: f, range: range, old: oldText, new: newText, made: Date()) { [weak self] res, at in
+                guard let self = self else { return }
+                self.noteWord(String(format: "fixed (margin %.1f): write ", margin) + "\(res)" + (at != spanStart ? " (moved \(at - spanStart))" : ""))
+                switch res {
+                case .ok:
+                    let newLen = (newText as NSString).length
+                    self.edited(at: at, oldLen: range.length, newLen: newLen)
+                    let pid = self.addPill(NSRange(location: at, length: newLen), newText)
+                    self.recents.append(Recent(start: at, newText: newText, oldText: oldText, word: word, learnTyped: merged ? oldText : word,
+                                               out: out, sep: sep, pillId: pid, until: Date().addingTimeInterval(Self.REVERT_SECS)))
+                    if self.recents.count > 6 { self.recents.removeFirst() }
+                    // backspace undoes it, and it's the previous word for the next one, while nothing else was typed
+                    self.lock.lock(); let fresh = self.keySeq == seq; if fresh { self.undoArmed = seq }; self.lock.unlock()
+                    if fresh && !merged { setPrev(out, at + newLen - (out as NSString).length) }
+                    self.pushOverlay()
+                case .unsupported:
+                    self.writesFailed(f)
+                case .changed:
+                    break
+                }
+            })
         }
     }
 
-    /// one AX write with the user's keys held back meanwhile
-    private func write(_ f: AXField, _ r: NSRange, old: String, new: String) -> AXField.Write {
+    // MARK: writes
+
+    /// A fix waiting to be written (see fix()).
+    private struct PendingFix {
+        let f: AXField
+        let range: NSRange
+        let old: String
+        let new: String
+        let made: Date
+        let done: (AXField.Write, Int) -> Void
+    }
+    private var pendingFixes: [PendingFix] = []
+    private var pendingWork: DispatchWorkItem?
+
+    /// Write a fix now if it's safe, else keep it until the next separator or a pause (it's re-anchored every try).
+    private func fix(_ p: PendingFix) {
+        guard p.f.same(field), Date().timeIntervalSince(p.made) < 30 else { input.debugNote("fix dropped: the field changed or it waited too long"); return }
+        let (res, at, why) = write(p.f, p.range, old: p.old, new: p.new)
+        guard let r = res else {
+            // tried again at the next separator or after a pause (onKey), not in a loop
+            pendingFixes.append(p)
+            input.debugNote("fix waits: \(why)")
+            return
+        }
+        if r != .ok && !why.isEmpty { input.debugNote("fix not written: \(why)") }
+        p.done(r, at)
+    }
+
+    private func schedulePending(after: Double) {
+        guard !pendingFixes.isEmpty else { return }
+        pendingWork?.cancel()
+        let w = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            let ps = self.pendingFixes
+            self.pendingFixes = []
+            for p in ps { self.fix(p) }
+        }
+        pendingWork = w
+        q.asyncAfter(deadline: .now() + after, execute: w)
+    }
+
+    /// One write, anchored to the text, inside one hold of the user's keys: let the keys typed just before land,
+    /// re-read the field, find the target by its content (never the word at the caret; while the user is mid-word,
+    /// wait), write it, put the caret back where it was relative to the text, then replay the held keys in order.
+    /// -> (nil = wait, try later), where it was written, why not
+    private func write(_ f: AXField, _ r: NSRange, old: String, new: String, atCaretOK: Bool = false) -> (res: AXField.Write?, at: Int, why: String) {
+        var res: AXField.Write? = nil
+        var at = r.location
+        var why = ""
+        input.gate {
+            self.settle(f)
+            guard let snap = f.snapshot() else { why = "couldn't read the field"; res = .changed; return }
+            if snap.selLength > 0 && !atCaretOK { why = "the user has text selected"; return }
+            self.lock.lock(); let typing = Date().timeIntervalSince(self.lastKeyAt) < 0.45; self.lock.unlock()
+            switch FixAnchor.check(text: snap.text, base: snap.base, caret: snap.caret, old: old, start: r.location, atCaretOK: atCaretOK,
+                                   typing: typing) {
+            case .wait(let w): why = w
+            case .drop(let w): why = w; res = .changed
+            case .apply(let a):
+                at = a
+                res = self.rawWrite(f, NSRange(location: a, length: r.length), old: old, new: new)
+            }
+        }
+        return (res, at, why)
+    }
+
+    /// keys are held now: give the ones delivered just before a moment to land, until the caret stops moving
+    private func settle(_ f: AXField) {
+        let t0 = Date()
+        while Date().timeIntervalSince(t0) < 0.3 {
+            lock.lock(); let last = lastKeyAt; lock.unlock()
+            if Date().timeIntervalSince(last) >= 0.06 { break }
+            usleep(10_000)
+        }
+        var s = f.selection
+        for _ in 0..<5 {
+            usleep(12_000)
+            let s2 = f.selection
+            if s2 == s { break }
+            s = s2
+        }
+    }
+
+    /// the write itself (keys already held): AX text write, or typing over the selection where that doesn't take
+    private func rawWrite(_ f: AXField, _ r: NSRange, old: String, new: String) -> AXField.Write {
         var res = AXField.Write.changed
         let app = bundle(f.pid)
         if typedApps.contains(app) {
             // remembered: this app ignores AX text writes, so don't wait for one to time out
-            input.gate { res = f.replaceByTyping(r, old: old, new: new) { self.input.typeTagged($0) } }
+            res = f.replaceByTyping(r, old: old, new: new) { self.input.typeTagged($0) }
             if res == .ok { lock.lock(); dWritePath = "\(app): typing over the selection (remembered)"; lock.unlock() }
         } else {
-            input.gate { res = f.replace(r, old: old, new: new) }
+            res = f.replace(r, old: old, new: new)
             if res == .ok { lock.lock(); dWritePath = "\(app): accessibility text write"; lock.unlock() }
             // editors that take a selection but ignore AXSelectedText (Slate in Discord): type over the selection
             if res == .unsupported && f.lastSelectionOK {
                 let first = f.lastWrite
-                input.gate { res = f.replaceByTyping(r, old: old, new: new) { self.input.typeTagged($0) } }
+                res = f.replaceByTyping(r, old: old, new: new) { self.input.typeTagged($0) }
                 f.lastWrite += " (AX write: \(first))"
                 if res == .ok {
                     typedApps.insert(app)
@@ -686,20 +779,21 @@ final class TextLayer {
         let old = rc.newText + (viaBackspace ? rc.sep : "")
         let range = NSRange(location: rc.start, length: (old as NSString).length)
         guard snap.sub(range) == old else { if viaBackspace { input.postBackspace() }; return }
-        let res = write(f, range, old: old, new: rc.oldText)
-        input.debugNote("ax: revert \"\(old)\" -> \"\(rc.oldText)\" \(res)")
+        // an explicit undo may touch the word at the caret
+        let (res, at, why) = write(f, range, old: old, new: rc.oldText, atCaretOK: true)
+        input.debugNote("ax: revert \"\(old)\" -> \"\(rc.oldText)\" \(res.map { "\($0)" } ?? "waiting") \(why)")
         guard res == .ok else { if viaBackspace { input.postBackspace() }; return }
         let newLen = (rc.oldText as NSString).length
-        edited(at: rc.start, oldLen: range.length, newLen: newLen)
+        edited(at: at, oldLen: range.length, newLen: newLen)
         pills.removeAll { $0.id == rc.pillId }
-        keepOnce = (rc.start + newLen - (rc.word as NSString).length, rc.word)
+        keepOnce = (at + newLen - (rc.word as NSString).length, rc.word)
         prev = nil
         pushOverlay()
         // Learning waits a few seconds: an undo followed by retyping the same correction was an accident, not a
         // rejection. Otherwise, as backspace-undo on Android: the edit needs more evidence for a week (and a non-word
         // typed on purpose goes in the personal dictionary, unless it looks like a slip of a common word).
         let undoneAt = Date().timeIntervalSince1970
-        let spot = rc.start
+        let spot = at
         q.asyncAfter(deadline: .now() + 4) { [weak self] in
             guard let self = self else { return }
             let now = self.wordAt(f, spot)
@@ -850,15 +944,18 @@ final class TextLayer {
                 // writes last, right to left so earlier offsets hold, and only while the user still isn't typing
                 for ap in applies.sorted(by: { $0.range.location > $1.range.location }) {
                     guard self.seqNow == seq else { break }
-                    let r = self.write(f, ap.range, old: ap.from, new: ap.to)
-                    self.noteIdle("fixed a word after the pause: write \(r)")
-                    if r == .unsupported { self.writesFailed(f); break }
-                    guard r == .ok else { continue }
-                    let newLen = (ap.to as NSString).length
-                    self.edited(at: ap.range.location, oldLen: ap.range.length, newLen: newLen)
-                    let pid = self.addPill(NSRange(location: ap.range.location, length: newLen), ap.to)
-                    self.recents.append(Recent(start: ap.range.location, newText: ap.to, oldText: ap.from, word: ap.from, learnTyped: ap.from,
-                                               out: ap.to, sep: "", pillId: pid, until: Date().addingTimeInterval(Self.REVERT_SECS)))
+                    self.fix(PendingFix(f: f, range: ap.range, old: ap.from, new: ap.to, made: Date()) { [weak self] r, at in
+                        guard let self = self else { return }
+                        self.noteIdle("fixed a word after the pause: write \(r)")
+                        if r == .unsupported { self.writesFailed(f); return }
+                        guard r == .ok else { return }
+                        let newLen = (ap.to as NSString).length
+                        self.edited(at: at, oldLen: ap.range.length, newLen: newLen)
+                        let pid = self.addPill(NSRange(location: at, length: newLen), ap.to)
+                        self.recents.append(Recent(start: at, newText: ap.to, oldText: ap.from, word: ap.from, learnTyped: ap.from,
+                                                   out: ap.to, sep: "", pillId: pid, until: Date().addingTimeInterval(Self.REVERT_SECS)))
+                        self.pushOverlay()
+                    })
                 }
                 self.pushOverlay()
                 if more && !typing { self.scheduleIdle(seq) }
@@ -904,20 +1001,23 @@ final class TextLayer {
         guard let m = tracker.mark(id: id) else { notePick("failed: the mark was removed before the fix ran"); return }
         guard let snap = f.snapshot() else { notePick("failed: couldn't read the field's text"); return }
         // the mark's offset can be stale (parked and restored, text edited before it): find the word again
-        guard let at = MarkTracker.locate(m, in: snap.text, base: snap.base) else {
+        guard let found = MarkTracker.locate(m, in: snap.text, base: snap.base) else {
             let there = snap.sub(NSRange(location: m.start, length: m.length)) ?? "nothing"
             notePick("failed: \"\(m.word)\" isn't in the field any more (reads \"\(there)\" there)")
             tracker.remove(id: id)
             pushOverlay()
             return
         }
-        let range = NSRange(location: at, length: m.length)
+        let range = NSRange(location: found, length: m.length)
         let t0 = Date()
-        let r = write(f, range, old: m.word, new: to)
+        // the user chose it: the word at the caret is fair game (they clicked into it)
+        let (res, wrote, why) = write(f, range, old: m.word, new: to, atCaretOK: true)
+        let r = res ?? .changed
         let ms = Int(Date().timeIntervalSince(t0) * 1000)
         input.debugNote("ax: pick \"\(m.word)\" -> \"\(to)\" \(r)")
         if r == .unsupported { writesFailed(f) }
-        guard r == .ok else { notePick("failed after \(ms) ms: write \(r): \(f.lastWrite)"); return }
+        guard r == .ok else { notePick("failed after \(ms) ms: write \(r): \(why.isEmpty ? f.lastWrite : why)"); return }
+        let at = wrote
         notePick("fixed in \(ms) ms: \(f.lastWrite)" + (at != m.start ? " (the word had moved \(at - m.start) chars)" : ""))
         tracker.remove(id: id)
         let newLen = (to as NSString).length
