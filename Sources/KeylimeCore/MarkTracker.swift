@@ -9,6 +9,8 @@ public struct Mark: Equatable {
     public let spelling: Bool
     /// found by the pause re-check (those are the only marks a later re-check may take back)
     public var fromIdle = false
+    /// how much the model preferred the top fix over the word as typed (upload events' margin), nil = unknown
+    public var gap: Double? = nil
     public var length: Int { word.utf16.count }
     public var end: Int { start + length }
 }
@@ -27,9 +29,10 @@ public final class MarkTracker {
     public var isEmpty: Bool { marks.isEmpty }
 
     @discardableResult
-    public func add(start: Int, word: String, fixes: [String], spelling: Bool, fromIdle: Bool = false) -> Mark {
+    public func add(start: Int, word: String, fixes: [String], spelling: Bool, fromIdle: Bool = false, gap: Double? = nil) -> Mark {
         var m = Mark(id: nextId, start: start, word: word, fixes: fixes, spelling: spelling)
         m.fromIdle = fromIdle
+        m.gap = gap
         nextId += 1
         marks.removeAll { $0.start < m.end && m.start < $0.end }
         marks.append(m)

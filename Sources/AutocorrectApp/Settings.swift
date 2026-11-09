@@ -21,7 +21,7 @@ final class Settings {
     private var excludedCache: [String]
 
     init() {
-        d.register(defaults: ["enabled": true, "holdMs": 200, "checkUpdates": true, "preview": false])
+        d.register(defaults: ["enabled": true, "holdMs": 200, "checkUpdates": true, "preview": false, "shareData": false])
         if d.array(forKey: "excludedApps") == nil { d.set(Self.defaultExcluded, forKey: "excludedApps") }
         excludedCache = d.stringArray(forKey: "excludedApps") ?? Self.defaultExcluded
         // 0.1.x had an on/off switch only
@@ -104,6 +104,35 @@ final class Settings {
             d.set(newValue.nextSentence, forKey: "perfNextSentence")
         }
     }
+
+    // MARK: data sharing (opt-in, off by default; docs/upload-schema.md)
+
+    /// upload word-level correction events
+    var shareData: Bool {
+        get { d.bool(forKey: "shareData") }
+        set { d.set(newValue, forKey: "shareData") }
+    }
+
+    /// random per-install id (not tied to the Mac or the user); a new one after "Delete my uploaded data"
+    var installId: String {
+        if let v = d.string(forKey: "installId") { return v }
+        return rotateInstallId()
+    }
+
+    @discardableResult
+    func rotateInstallId() -> String {
+        let v = UUID().uuidString.lowercased()
+        d.set(v, forKey: "installId")
+        return v
+    }
+
+    /// install ids whose server-side delete hasn't gone through yet (retried before any upload)
+    var pendingDeletes: [String] {
+        get { d.stringArray(forKey: "pendingDeletes") ?? [] }
+        set { d.set(Array(Set(newValue)).sorted(), forKey: "pendingDeletes") }
+    }
+
+    static let uploadURL = "https://autocorrect.mostlime.hackclub.app/api/v1/upload"
 
     var checkUpdates: Bool {
         get { d.bool(forKey: "checkUpdates") }

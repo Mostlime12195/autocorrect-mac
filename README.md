@@ -1,7 +1,9 @@
 # Keylime for Mac
 
 Menu bar app that fixes typos as you type, in any app, with our small on-device language model (same decoder as the
-Android keyboard). Nothing you type leaves the Mac.
+Android keyboard). Nothing you type leaves the Mac, unless you turn on **Share correction data** in Settings (off by
+default): then only scrubbed, word-level correction events are uploaded, as described in
+[docs/upload-schema.md](docs/upload-schema.md).
 
 Apple Silicon only, macOS 13+.
 

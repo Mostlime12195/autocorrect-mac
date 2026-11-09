@@ -19,7 +19,7 @@ struct PermissionView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Keylime needs Accessibility access").font(.title2).bold()
-            Text("It reads the text field you're typing in, fixes typos it's sure about and underlines the rest, using a small language model that runs on this Mac. Nothing you type leaves your computer.")
+            Text("It reads the text field you're typing in, fixes typos it's sure about and underlines the rest, using a small language model that runs on this Mac. Nothing you type leaves your computer (unless you turn on sharing correction data in Settings).")
                 .fixedSize(horizontal: false, vertical: true)
             VStack(alignment: .leading, spacing: 6) {
                 Text("1. Click **Open System Settings**.")
@@ -51,6 +51,15 @@ final class SettingsModel: ObservableObject {
     @Published var mode = Settings.shared.mode { didSet { Settings.shared.mode = mode; onChange?() } }
     @Published var preview = Settings.shared.preview { didSet { Settings.shared.preview = preview } }
     @Published var checkUpdates = Settings.shared.checkUpdates { didSet { Settings.shared.checkUpdates = checkUpdates } }
+    /// opt-in upload of word-level correction events; turning it off drops whatever is queued
+    @Published var shareData = Settings.shared.shareData {
+        didSet {
+            guard shareData != oldValue else { return }
+            Settings.shared.shareData = shareData
+            if !shareData { Uploader.shared.clearQueue() }
+        }
+    }
+    var openUploadPreview: (() -> Void)?
     @Published var systemAutocorrect = SystemAutocorrect.isOn
     @Published var perf = Settings.shared.perf { didSet { if perf != oldValue { Settings.shared.perf = perf; onPerf?(perf) } } }
     var onPerf: ((Settings.Perf) -> Void)?
@@ -64,6 +73,7 @@ final class SettingsModel: ObservableObject {
     private var timer: Timer?
     func reload() {
         if mode != Settings.shared.mode { mode = Settings.shared.mode }
+        if shareData != Settings.shared.shareData { shareData = Settings.shared.shareData }
         systemAutocorrect = SystemAutocorrect.isOn
         perf = Settings.shared.perf
         reloadWords()
@@ -103,6 +113,7 @@ struct SettingsView: View {
             }
             DictionarySection(model: model)
             PerformanceView(model: model)
+            DataSharingSection(model: model)
             VStack(alignment: .leading, spacing: 6) {
                 Text("Other").font(.headline)
                 Toggle("Check for updates automatically", isOn: $model.checkUpdates)
@@ -111,6 +122,70 @@ struct SettingsView: View {
         }
         .padding(20)
         .frame(width: 520)
+    }
+}
+
+/// Opt-in sharing of word-level correction events (off by default)
+struct DataSharingSection: View {
+    @ObservedObject var model: SettingsModel
+    @State private var confirmDelete = false
+    @State private var deleteResult: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Data sharing").font(.headline)
+            Toggle("Share correction data to improve Keylime", isOn: $model.shareData)
+            Text("Sends one event per correction decision: the word, the fixes offered, what you chose, and at most 2 words before and 1 after (lowercased; numbers, emails and links dropped). Never sentences, password fields or excluded apps.")
+                .font(.footnote).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Button("Upload Preview…") { model.openUploadPreview?() }
+                Button("Delete My Uploaded Data…") { confirmDelete = true }
+                if let r = deleteResult { Text(r).font(.footnote).foregroundColor(.secondary) }
+            }
+        }
+        .alert("Delete your uploaded data?", isPresented: $confirmDelete) {
+            Button("Delete", role: .destructive) {
+                deleteResult = "Deleting…"
+                Uploader.shared.deleteMyData { ok in
+                    deleteResult = ok ? "Deleted." : "The server couldn't be reached; it'll be retried automatically."
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Everything uploaded from this Mac is deleted from the server, the upload queue is cleared and Keylime switches to a new random ID.")
+        }
+    }
+}
+
+/// The last queued upload events, exactly as they'll be sent (newest first)
+final class UploadPreviewModel: ObservableObject {
+    @Published var text = ""
+    func reload() {
+        let p = Uploader.shared.preview(20)
+        let head = Settings.shared.shareData ? "Sharing is on." : "Sharing is off: nothing is queued or sent."
+        let count = "\(p.total) event(s) queued" + (p.total > p.lines.count ? ", the newest \(p.lines.count) below" : "")
+        text = ([head, count, "Last upload: \(Uploader.shared.status)", ""] + p.lines).joined(separator: "\n")
+    }
+}
+
+struct UploadPreviewView: View {
+    @ObservedObject var model: UploadPreviewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ScrollView {
+                Text(model.text)
+                    .font(.system(size: 11, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            HStack {
+                Spacer()
+                Button("Refresh") { model.reload() }
+            }
+        }
+        .padding(14)
+        .frame(minWidth: 560, minHeight: 360)
     }
 }
 

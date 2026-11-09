@@ -84,6 +84,10 @@ final class TextLayer {
     private struct Recent {
         var start: Int; let newText: String; let oldText: String; let word: String; let learnTyped: String; let out: String
         let sep: String; let pillId: Int; let until: Date
+        // for the opt-in upload event: the other fixes offered (best first), the model's preference, typed not a word,
+        // a two-word merge (never reported), and whether its decision went out already
+        var alts: [String] = []; var gap: Double? = nil; var oov = false; var merged = false
+        var reported = false
     }
     private struct Pill { let id: Int; var range: NSRange; let text: String; let until: Date }
     private struct Preview { let start: Int; let word: String; let out: String }
@@ -413,6 +417,7 @@ final class TextLayer {
             parked = (old.el, tracker.marks)
             noteDropped(tracker.marks.count, (f == nil ? "field lost or app switched" : "focus moved to another field") + "; parked, back if the field returns")
         }
+        reportKept(all: true)
         tracker.removeAll(); pills.removeAll(); recents.removeAll(); prev = nil; keepOnce = nil; rectCache.removeAll()
         if let f = f, let p = parked, CFEqual(p.el, f.el) {
             tracker.restore(p.marks)
@@ -561,7 +566,7 @@ final class TextLayer {
             setPrev(word, start)
         case .flag(let fixes, let spelling):
             prev = nil
-            tracker.add(start: start, word: word, fixes: fixes, spelling: spelling)
+            tracker.add(start: start, word: word, fixes: fixes, spelling: spelling, gap: o.gap)
             noteWord(String(format: "underlined, %d fixes (margin %.1f, gap %.1f)", fixes.count, o.margin, o.gap))
             pushOverlay()
         case .apply(let out, let prevNew, let merged):
@@ -576,6 +581,7 @@ final class TextLayer {
             let range = NSRange(location: spanStart, length: (oldText as NSString).length)
             prev = nil
             let margin = o.margin
+            let alts = o.fixes.filter { $0 != out }, gap = o.gap, oov = o.typedOOV
             // written when it's safe: never into the word being typed; mid-word it waits for the separator / a pause
             fix(PendingFix(f: f, range: range, old: oldText, new: newText, made: Date()) { [weak self] res, at in
                 guard let self = self else { return }
@@ -586,8 +592,9 @@ final class TextLayer {
                     self.edited(at: at, oldLen: range.length, newLen: newLen)
                     let pid = self.addPill(NSRange(location: at, length: newLen), newText)
                     self.recents.append(Recent(start: at, newText: newText, oldText: oldText, word: word, learnTyped: merged ? oldText : word,
-                                               out: out, sep: sep, pillId: pid, until: Date().addingTimeInterval(Self.REVERT_SECS)))
-                    if self.recents.count > 6 { self.recents.removeFirst() }
+                                               out: out, sep: sep, pillId: pid, until: Date().addingTimeInterval(Self.REVERT_SECS),
+                                               alts: alts, gap: gap, oov: oov, merged: merged))
+                    if self.recents.count > 6 { self.reportKept(self.recents.removeFirst()) }
                     // backspace undoes it, and it's the previous word for the next one, while nothing else was typed
                     self.lock.lock(); let fresh = self.keySeq == seq; if fresh { self.undoArmed = seq }; self.lock.unlock()
                     if fresh && !merged { setPrev(out, at + newLen - (out as NSString).length) }
@@ -802,6 +809,20 @@ final class TextLayer {
                 self.input.debugNote("undo looked accidental (the correction was typed again): nothing learned")
                 return
             }
+            if !rc.reported && !rc.merged {
+                // what the word is now: back to what was typed (undone), or something else the user wrote (manual fix)
+                let pos = spot + (rc.oldText as NSString).length - (rc.word as NSString).length
+                if let w = self.wordAt(f, pos), let s = f.snapshot(), let a = self.wordStart(s, pos) {
+                    if w == rc.word {
+                        self.report(typed: rc.word, suggestion: rc.out, alts: rc.alts, oov: rc.oov, outcome: "auto_applied_undone",
+                                    gap: rc.gap, ctx: self.around(s, a, w))
+                    } else if w != rc.out, let next = s.unit(a + (w as NSString).length), !MarkTracker.isWordUnit(next) {
+                        // only a finished word (a separator after it): a word still being typed isn't a known result
+                        self.report(typed: rc.word, suggestion: rc.out, alts: rc.alts, oov: rc.oov, outcome: "manual_fix", final: w,
+                                    gap: rc.gap, ctx: self.around(s, a, w))
+                    }
+                }
+            }
             self.engine.user.suppress(rc.learnTyped, rc.out)
             self.input.learn(Undone(typed: rc.learnTyped, out: rc.out))
         }
@@ -917,7 +938,7 @@ final class TextLayer {
                 guard let res = res, self.seqNow == seq, f.same(self.field), let s2 = f.snapshot(),
                       s2.base == snap.base, s2.caret == snap.caret, s2.text == snap.text else { self.noteIdle("dropped: typing resumed or the text changed"); return }
                 self.noteIdle("\(typing ? "while typing: " : "")checked \(res.count) sentence(s) in \(Int(ms)) ms, \(res.reduce(0) { $0 + $1.count }) flagged")
-                var applies: [(range: NSRange, from: String, to: String)] = []
+                var applies: [(range: NSRange, from: String, to: String, fixes: [String], gap: Double, spelling: Bool)] = []
                 for (j, fixes) in res.enumerated() {
                     let b = batch[j]
                     self.cache(b.key, fixes)
@@ -933,11 +954,11 @@ final class TextLayer {
                         let userWord = self.engine.user.has(fx.from) || self.ignored.contains(fx.from.lowercased())
                         switch Policy.idle(gap: fx.gap, spelling: spelling, mode: self.settings.mode,
                                            inCurrentSentence: current && a + len <= snap.caret, userWord: userWord) {
-                        case .apply where !typing: applies.append((NSRange(location: a, length: len), fx.from, fx.to))
+                        case .apply where !typing: applies.append((NSRange(location: a, length: len), fx.from, fx.to, fx.fixes, fx.gap, spelling))
                         case .apply: fallthrough   // no text changes while typing: underline it instead
                         case .flag:
                             if !self.tracker.has(start: a, word: fx.from) {
-                                self.tracker.add(start: a, word: fx.from, fixes: fx.fixes, spelling: spelling, fromIdle: true)
+                                self.tracker.add(start: a, word: fx.from, fixes: fx.fixes, spelling: spelling, fromIdle: true, gap: fx.gap)
                             }
                         case .none: break
                         }
@@ -955,7 +976,9 @@ final class TextLayer {
                         self.edited(at: at, oldLen: ap.range.length, newLen: newLen)
                         let pid = self.addPill(NSRange(location: at, length: newLen), ap.to)
                         self.recents.append(Recent(start: at, newText: ap.to, oldText: ap.from, word: ap.from, learnTyped: ap.from,
-                                                   out: ap.to, sep: "", pillId: pid, until: Date().addingTimeInterval(Self.REVERT_SECS)))
+                                                   out: ap.to, sep: "", pillId: pid, until: Date().addingTimeInterval(Self.REVERT_SECS),
+                                                   alts: ap.fixes.filter { $0 != ap.to }, gap: ap.gap, oov: ap.spelling))
+                        if self.recents.count > 6 { self.reportKept(self.recents.removeFirst()) }
                         self.pushOverlay()
                     })
                 }
@@ -1011,6 +1034,7 @@ final class TextLayer {
             return
         }
         let range = NSRange(location: found, length: m.length)
+        let ctx = around(snap, found, m.word)
         let t0 = Date()
         // the user chose it: the word at the caret is fair game (they clicked into it)
         let (res, wrote, why) = write(f, range, old: m.word, new: to, atCaretOK: true)
@@ -1022,6 +1046,10 @@ final class TextLayer {
         let at = wrote
         notePick("fixed in \(ms) ms: \(f.lastWrite)" + (at != m.start ? " (the word had moved \(at - m.start) chars)" : ""))
         tracker.remove(id: id)
+        if let top = m.fixes.first, let rank = m.fixes.firstIndex(of: to) {
+            report(typed: m.word, suggestion: top, alts: Array(m.fixes.dropFirst()), oov: m.spelling, outcome: "suggestion_picked",
+                   rank: rank, gap: m.gap, ctx: ctx)
+        }
         let newLen = (to as NSString).length
         edited(at: at, oldLen: m.length, newLen: newLen)
         _ = addPill(NSRange(location: at, length: newLen), to, revertable: false)
@@ -1038,6 +1066,7 @@ final class TextLayer {
     private func ignore(_ id: Int) {
         closePopover()
         guard let m = tracker.mark(id: id) else { return }
+        reportMark(m, "suggestion_ignored")
         ignored.insert(m.word.lowercased())
         tracker.removeAll(word: m.word)
         if let fix = m.fixes.first { engine.user.suppress(m.word, fix) }
@@ -1048,10 +1077,72 @@ final class TextLayer {
     private func addToDictionary(_ id: Int) {
         closePopover()
         guard let m = tracker.mark(id: id) else { return }
+        reportMark(m, "not_a_typo")
         engine.user.add(m.word)
         tracker.removeAll(word: m.word)
         sentenceCacheTouched()
         pushOverlay()
+    }
+
+    // MARK: upload events (opt-in; nothing happens unless "Share correction data" is on)
+
+    /// Corrections nobody undid: reported as kept once their revert window is over (all: now, e.g. the field is going
+    /// away). The last one stays revertable by backspace while nothing else was typed, so it waits for that.
+    private func reportKept(all: Bool) {
+        guard settings.shareData, !recents.isEmpty else { return }
+        let now = Date()
+        lock.lock(); let armed = undoArmed != nil; lock.unlock()
+        for i in recents.indices where !recents[i].reported {
+            let isLast = i == recents.count - 1
+            guard all || (recents[i].until < now && !(isLast && armed)) else { continue }
+            reportKept(recents[i])
+            recents[i].reported = true
+        }
+    }
+
+    private func reportKept(_ rc: Recent) {
+        guard !rc.reported, !rc.merged, settings.shareData, let f = field, let s = f.snapshot() else { return }
+        // the correction must still be in the text where we left it (else it's not known to be kept)
+        let at = rc.start + (rc.newText as NSString).length - (rc.out as NSString).length
+        guard let ctx = around(s, at, rc.out) else { return }
+        report(typed: rc.word, suggestion: rc.out, alts: rc.alts, oov: rc.oov, outcome: "auto_applied_kept", gap: rc.gap, ctx: ctx)
+    }
+
+    /// an underlined word the user decided about (ignore / not a typo)
+    private func reportMark(_ m: Mark, _ outcome: String) {
+        guard settings.shareData, let top = m.fixes.first else { return }
+        var ctx: (before: String, after: String)? = nil
+        if let s = field?.snapshot(), let at = MarkTracker.locate(m, in: s.text, base: s.base) { ctx = around(s, at, m.word) }
+        report(typed: m.word, suggestion: top, alts: Array(m.fixes.dropFirst()), oov: m.spelling, outcome: outcome, gap: m.gap, ctx: ctx)
+    }
+
+    /// Hand one decision to the uploader. Only the word, its fixes and the raw text right around it go in; the
+    /// uploader's event builder scrubs that down to at most 2 words before and 1 after.
+    private func report(typed: String, suggestion: String, alts: [String], oov: Bool, outcome: String, rank: Int? = nil,
+                        final: String? = nil, gap: Double?, ctx: (before: String, after: String)?) {
+        guard settings.shareData, let f = field,
+              CorrectionEvents.recordable(secureField: f.isSecure, secureInput: IsSecureEventInputEnabled(),
+                                          excludedApp: settings.isExcluded(bundle(f.pid))) else { return }
+        let kind = Kinds.classify(typed: typed, fix: suggestion, typedInVocab: !oov)
+        Uploader.shared.record(CorrectionDecision(typed: typed, suggestion: suggestion, alternatives: alts, kind: kind, outcome: outcome,
+                                                  pickedRank: rank, final: final, margin: gap, textBefore: ctx?.before,
+                                                  textAfter: ctx?.after, model: engine.modelId, appVersion: Updater.currentVersion))
+    }
+
+    /// the raw text around a word at an offset (about 160 UTF-16 units before, 80 after); nil when the word isn't there
+    private func around(_ s: AXField.Snapshot, _ at: Int, _ word: String) -> (before: String, after: String)? {
+        let len = (word as NSString).length
+        guard len > 0, s.sub(NSRange(location: at, length: len)) == word else { return nil }
+        let end = at + len, stop = max(end, min(s.end, end + 80))
+        return (textBefore(s, at, 160), s.sub(NSRange(location: end, length: stop - end)) ?? "")
+    }
+
+    /// where the word touching an offset starts
+    private func wordStart(_ s: AXField.Snapshot, _ at: Int) -> Int? {
+        guard at >= s.base, at <= s.end else { return nil }
+        var a = at
+        while a > s.base, let u = s.unit(a - 1), MarkTracker.isWordUnit(u) { a -= 1 }
+        return a
     }
 
     // MARK: usage meter
@@ -1167,9 +1258,11 @@ final class TextLayer {
         let now = Date()
         if settings.mode == .off || settings.isExcluded(input.frontmostBundleId) {
             noteDropped(tracker.marks.count, "mode is Off or app paused")
+            reportKept(all: true)
             tracker.removeAll(); pills.removeAll(); recents.removeAll()
         }
         pills.removeAll { $0.until < now }
+        reportKept(all: false)
         let lastId = recents.last?.pillId
         recents.removeAll { $0.until < now && $0.pillId != lastId }
         if let f = field, !(tracker.isEmpty && pills.isEmpty), let snap = f.snapshot() {

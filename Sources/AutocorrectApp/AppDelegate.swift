@@ -23,6 +23,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var permissionTimer: Timer?
     private var listsWindow: NSWindow?
     private var listsModel: ListsModel?
+    private var uploadPreviewWindow: NSWindow?
+    private let uploadPreviewModel = UploadPreviewModel()
     private var downloadStatus: String?
     private var installing = false
 
@@ -48,6 +50,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusModel.source = { [weak self] in self?.diagnostics() ?? "" }
         statusModel.testUnderline = { [weak self] in self?.showTestUnderline() }
         settingsModel.openLists = { [weak self] in self?.openLists() }
+        settingsModel.openUploadPreview = { [weak self] in self?.openUploadPreview() }
         settingsModel.usageSource = { [weak self] in self?.layer.usage() ?? "" }
         settingsModel.user = user
         let applyPerf: (Settings.Perf) -> Void = { [weak self] p in
@@ -58,6 +61,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         applyPerf(settings.perf)
         layer.startCpuSampling()
         Updater.shared.onChange = { [weak self] in self?.refreshIcon() }
+        Uploader.shared.start()
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         menu.delegate = self
@@ -339,6 +343,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         listsModel?.reload()
         NSApp.activate(ignoringOtherApps: true)
         listsWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    private func openUploadPreview() {
+        if uploadPreviewWindow == nil { uploadPreviewWindow = makeWindow("Keylime Upload Preview", UploadPreviewView(model: uploadPreviewModel)) }
+        uploadPreviewModel.reload()
+        NSApp.activate(ignoringOtherApps: true)
+        uploadPreviewWindow?.makeKeyAndOrderFront(nil)
     }
 
     @objc private func openPermission() { showPermission() }
