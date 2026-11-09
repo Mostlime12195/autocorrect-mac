@@ -55,6 +55,9 @@ final class TextLayer {
     private var dBounds = "no marks queried yet"
     private var dPids = "no field yet"
     private var dTest = "not run"
+    private var dParams = "?"
+    private var dSource = "none yet"
+    private var paramsFor: AXField?
     private let log = Logger(subsystem: "dev.mostlime.autocorrect-mac", category: "text")
 
     // MARK: text queue only
@@ -326,6 +329,13 @@ final class TextLayer {
             return
         }
         let role = (f.role ?? "?") + (f.subrole.map { "/" + $0 } ?? "")
+        if !f.same(paramsFor) {
+            paramsFor = f
+            let names = f.parameterizedNames
+            let p = names.isEmpty ? "none" : names.joined(separator: ", ")
+            lock.lock(); dParams = p; lock.unlock()
+            log.info("field \(role, privacy: .public) parameterized attributes: \(p, privacy: .public)")
+        }
         lock.lock(); dRole = role; lock.unlock()
         noWrite.removeAll { Date().timeIntervalSince($0.at) > 60 }
         if f.isSecure { setMode(.ax, "password field: nothing happens here"); return }
@@ -801,6 +811,8 @@ final class TextLayer {
             "Processes: \(dPids)",
             "Marks: \(dMarks); drawn: \(dDrawn)",
             "Bounds (last mark queried): \(dBounds)",
+            "Bounds source in use: \(dSource)",
+            "Field parameterized attributes: \(dParams)",
             "Test underline: \(dTest)",
         ].joined(separator: "\n")
     }
@@ -822,7 +834,7 @@ final class TextLayer {
             if let f = f, let sel = f.selection {
                 let a = max(0, sel.location - 5)
                 let range = sel.location > a ? NSRange(location: a, length: sel.location - a) : NSRange(location: sel.location, length: 1)
-                let (b, detail) = f.boundsDetail(range)
+                let (b, detail) = BoundsSession(f).bounds(range, all: true)
                 rect = b
                 why = b == nil ? "\(source): no bounds (\(detail)), drew at the mouse" : "\(source): under the text before the caret, \(detail)"
             } else {
@@ -887,10 +899,14 @@ final class TextLayer {
         var hidden = 0
         if let f = field, owned(f, by: front), mode == .ax, !(tracker.isEmpty && pills.isEmpty) {
             let visible = f.visibleFrame()
+            let session = BoundsSession(f)
+            var first = true
             let t0 = Date()
             for m in tracker.marks.suffix(40) {
                 if Date().timeIntervalSince(t0) > 0.15 { break }   // a slow app: draw what we have
-                let (b, detail) = f.boundsDetail(NSRange(location: m.start, length: m.length))
+                // until some source has worked here, the first mark tries them all (the status window shows each)
+                let (b, detail) = session.bounds(NSRange(location: m.start, length: m.length), all: first && f.boundsSource == nil)
+                first = false
                 boundsNote = detail
                 guard let r = b else { continue }
                 if let v = visible, !v.intersects(r) { hidden += 1; continue }
@@ -898,7 +914,7 @@ final class TextLayer {
                 mh.append((r, m.id))
             }
             for p in pills where p.until > now {
-                guard let r = f.bounds(p.range) else { continue }
+                guard let r = session.bounds(p.range).rect else { continue }
                 if let v = visible, !v.intersects(r) { continue }
                 let revertable = recents.contains { $0.pillId == p.id }
                 items.append(.pill(id: p.id, rect: r, revertable: revertable))
@@ -912,10 +928,11 @@ final class TextLayer {
             else if tracker.isEmpty && pills.isEmpty { why = "no marks" }
             else { why = "\(items.count) of \(tracker.marks.count + pills.count) drawn, \(hidden) outside the visible field" }
         } else { why = "no field" }
-        if let n = boundsNote, !n.hasPrefix("ok") { log.notice("bounds failed: \(n, privacy: .public)") }
+        if let n = boundsNote, n.hasPrefix("no source") { log.notice("bounds failed: \(n, privacy: .public)") }
         lock.lock()
         markHits = mh; pillHits = ph; dMarks = tracker.marks.count; dDrawn = why
         if let n = boundsNote { dBounds = n }
+        if let src = field?.boundsSource { dSource = src }
         if let f = field { dPids = "field pid \(f.pid) (\(bundle(f.pid))), frontmost pid \(front) (\(bundle(front)))" }
         lock.unlock()
         if items.isEmpty && overlayEmpty { stopTimer(); return }

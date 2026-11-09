@@ -12,6 +12,15 @@ final class AXField {
     let pid: pid_t
     /// why the last write did what it did (for the status window)
     var lastWrite = ""
+    /// the bounds source that last worked here (BoundsSession)
+    var boundsSource: String?
+
+    /// parameterized attributes the element offers (for the status window)
+    var parameterizedNames: [String] {
+        var names: CFArray?
+        guard AXUIElementCopyParameterizedAttributeNames(el, &names) == .success, let n = names as? [String] else { return [] }
+        return n
+    }
 
     init(_ el: AXUIElement) {
         self.el = el
@@ -137,11 +146,12 @@ final class AXField {
     }
 
     /// screen rect (AX coordinates: top-left origin, y down) of a range; nil when the app doesn't say or says nonsense
-    func bounds(_ r: NSRange) -> CGRect? { boundsDetail(r).rect }
+    /// screen rect of a range from whichever source this field answers (see BoundsSession)
+    func bounds(_ r: NSRange) -> CGRect? { BoundsSession(self).bounds(r).rect }
 
-    /// bounds of a range, with what happened (for the status window). Falls back to the first and last character
-    /// joined, for fields that only answer single characters.
-    func boundsDetail(_ r: NSRange) -> (rect: CGRect?, detail: String) {
+    /// AXBoundsForRange, with what happened. Falls back to the first and last character joined, for fields that
+    /// only answer single characters.
+    func boundsDetailRange(_ r: NSRange) -> (rect: CGRect?, detail: String) {
         let (a, why) = rawBounds(r)
         if let a = a { return (a, "ok \(NSStringFromRect(a))") }
         guard r.length > 1 else { return (nil, why) }
