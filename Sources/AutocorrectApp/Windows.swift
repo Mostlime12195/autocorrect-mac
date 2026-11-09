@@ -186,7 +186,7 @@ struct PerformanceView: View {
                 Slider(value: Binding(get: { Double(model.perf.ctxTokens) }, set: { model.perf.ctxTokens = Int($0) }), in: 64...1024, step: 64)
                 Text("\(model.perf.ctxTokens) tokens").monospacedDigit().frame(width: 84, alignment: .trailing)
             }
-            Text("Tokens of text before each word the model takes into account (about \(model.perf.ctxTokens * 4) characters). The m2 model was trained on 1024; more context costs more time per word, shown below. Heavier settings also check more often and more of the text. Checks never hold up typing: the next key cancels them.")
+            Text("Tokens of text before each word the model takes into account (about \(model.perf.ctxTokens * 4) characters). The m2 model was trained on 1024 (960 usable here). Measured on an M2 Pro: about 100 ms a word at 64–256, about 265 ms at 1024; the meter below shows yours. Heavier settings also check more often and more of the text. Checks never hold up typing: the next key cancels them.")
                 .font(.footnote).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
             Text(model.usage).font(.system(size: 11, design: .monospaced)).fixedSize(horizontal: false, vertical: true)
         }

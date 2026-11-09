@@ -80,7 +80,8 @@ final class Settings {
         var leftChars: Int { Swift.max(320, ctxTokens * 5) }
 
         static let battery = Perf(idleSecs: 2.0, everyWords: 0, wholeField: false, ctxTokens: 64, nextSentence: false)
-        static let balanced = Perf(idleSecs: 1.0, everyWords: 0, wholeField: false, ctxTokens: 1024, nextSentence: false)
+        // 256: measured on an M2 Pro (VM) at ~100 ms/word, same as 64; 1024 was ~265 ms/word, too slow to keep up
+        static let balanced = Perf(idleSecs: 1.0, everyWords: 0, wholeField: false, ctxTokens: 256, nextSentence: false)
         static let max = Perf(idleSecs: 0.3, everyWords: 2, wholeField: true, ctxTokens: 1024, nextSentence: true)
         static let presets: [(String, String, Perf)] = [("battery", "Battery saver", battery), ("balanced", "Balanced", balanced), ("max", "Max", max)]
 

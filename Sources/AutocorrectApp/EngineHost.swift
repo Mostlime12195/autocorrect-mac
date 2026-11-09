@@ -118,9 +118,15 @@ final class EngineHost {
     func correct(_ job: CorrectionJob, precheck: @escaping () -> Bool, done: @escaping (WordResult?, Bool) -> Void) {
         queue.async {
             guard precheck() else { done(nil, false); return }
+            // the keystroke fallback holds the separator (200 ms at most): never more than 256 tokens there
+            let full = self.scorer?.maxCtx
+            if let f = full, f > Self.KEYS_MAX_CTX { self.scorer?.maxCtx = Self.KEYS_MAX_CTX }
             self.correctOnQueue(job.input, job.prev, job.merge, done)
+            if let f = full { self.scorer?.maxCtx = f }
         }
     }
+
+    static let KEYS_MAX_CTX = 256
 
     /// One finished word (AX path). done(result, typed word is in the lexicon), on the engine queue.
     func correctWord(_ input: WordInput, prev: PrevWord?, merge: MergeInput?, done: @escaping (WordResult?, Bool) -> Void) {
