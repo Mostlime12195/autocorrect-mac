@@ -90,13 +90,17 @@ public enum Policy {
     /// (iPhone -> iphone), or rewriting one beyond a slip; un-stretching "sooo" / "lllmo" (a slip fix like "asssault"
     /// -> "assault" is still fine).
     public static func isProtected(_ typed: String, out: String, typedOOV: Bool) -> Bool {
-        // re-casing a mixed-case / ALLCAPS word is never a typo fix, word or not (iPhone -> iphone)
-        if !plainCase(typed) && typed.lowercased() == out.lowercased() && typed != out { return true }
+        if recasing(typed, out) { return true }
         guard typedOOV else { return false }
         let slip = QualityGuard.looksLikeSlip(typed, of: out)
         if !plainCase(typed) && (typed.lowercased() == out.lowercased() || !slip) { return true }
         if stretched(typed) && !slip { return true }
         return false
+    }
+
+    /// only the case of a mixed-case / ALLCAPS word would change
+    public static func recasing(_ typed: String, _ out: String) -> Bool {
+        !plainCase(typed) && typed != out && typed.lowercased() == out.lowercased()
     }
 
     /// lowercase, or one capital at the start (not ALLCAPS, not iPhone / McDonald)
@@ -135,6 +139,8 @@ public enum Policy {
                                 penalty: (String, String) -> Double = { _, _ in 0 }, nameLike: Bool = false,
                                 forceNonWords: Bool = true) -> Boundary {
         if mode == .off || userWord { return .keep }
+        // re-casing a mixed-case / ALLCAPS word (iPhone -> iphone) is neither a fix nor worth an underline
+        if forceNonWords && recasing(o.typed, o.out) && o.merge == nil && o.recheck == nil { return .keep }
         let nw = forceNonWords ? nonWord(o, nameLike: nameLike) : .notApplicable
         let flag: Boundary = (o.out != o.typed && o.gap >= FLAG_MARGIN && !o.fixes.isEmpty) || nw != .notApplicable ?
             .flag(fixes: o.fixes, spelling: o.typedOOV || isSpellingEdit(o.typed, o.out, typedOOV: o.typedOOV)) : .keep

@@ -101,7 +101,8 @@ final class NonWordPolicyTests: XCTestCase {
 
     func testProtectedWordsAreNotChangedEvenWhenConfident() {
         let iphone = WordOutcome(typed: "iPhone", out: "iphone", margin: 5.6, gap: 5.6, fixes: ["iphone"], typedOOV: true)
-        XCTAssertEqual(Policy.boundary(iphone, mode: .auto, hasPrev: false, prevOut: nil, userWord: false), .flag(fixes: ["iphone"], spelling: true))
+        XCTAssertEqual(Policy.boundary(iphone, mode: .auto, hasPrev: false, prevOut: nil, userWord: false), .keep)
+        XCTAssertEqual(Policy.boundary(iphone, mode: .suggest, hasPrev: false, prevOut: nil, userWord: false), .keep)
         let stretched = WordOutcome(typed: "lllmo", out: "lmao", margin: 5.7, gap: 5.7, fixes: ["lmao"], typedOOV: true)
         XCTAssertEqual(Policy.boundary(stretched, mode: .auto, hasPrev: false, prevOut: nil, userWord: false), .flag(fixes: ["lmao"], spelling: true))
         // even when the lowercase form is a lexicon word
