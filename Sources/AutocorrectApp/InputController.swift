@@ -472,7 +472,13 @@ final class InputController {
         engine.queue.async { [engine] in
             let spelling = !typed.contains(" ") && !out.contains(" ") &&
                 typed.lowercased().filter { $0.isLetter } != out.lowercased().filter { $0.isLetter }
-            if spelling && !engine.inLexiconOnQueue(typed) { engine.user.add(typed) } else { engine.user.suppress(typed, out) }
+            // a word that looks like a slip of a common word isn't learned as a word (only the edit is suppressed)
+            let common = (engine.rankOnQueue(out) ?? Int.max) < 30_000
+            if spelling && !engine.inLexiconOnQueue(typed) && QualityGuard.mayLearn(typed, undoneFix: out, outIsCommon: common) {
+                engine.user.add(typed)
+            } else {
+                engine.user.suppress(typed, out)
+            }
         }
     }
 

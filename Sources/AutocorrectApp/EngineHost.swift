@@ -78,6 +78,9 @@ final class EngineHost {
     /// engine queue only
     func inLexiconOnQueue(_ w: String) -> Bool { corrector?.lex.index[w.lowercased()] != nil }
 
+    /// engine queue only: frequency rank in the lexicon (0 = most common)
+    func rankOnQueue(_ w: String) -> Int? { corrector?.lex.index[w.lowercased()] }
+
     /// Open a model's session (loader queue), then swap it in and warm it up.
     func load(spec: ModelSpec, graph: URL, vocab: URL, completion: ((Error?) -> Void)? = nil) {
         setStatus("Loading \(spec.label)…", ready: false)

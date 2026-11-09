@@ -49,6 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusModel.testUnderline = { [weak self] in self?.showTestUnderline() }
         settingsModel.openLists = { [weak self] in self?.openLists() }
         settingsModel.usageSource = { [weak self] in self?.layer.usage() ?? "" }
+        settingsModel.user = user
         let applyPerf: (Settings.Perf) -> Void = { [weak self] p in
             TypingCore.CTX_CHARS = p.leftChars
             self?.engine.setContext(p.ctxTokens)

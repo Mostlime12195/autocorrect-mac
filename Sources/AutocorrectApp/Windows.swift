@@ -58,11 +58,15 @@ final class SettingsModel: ObservableObject {
     var onChange: (() -> Void)?
     var openLists: (() -> Void)?
     var usageSource: (() -> String)?
+    var user: UserData?
+    @Published var words: [String] = []
+    func reloadWords() { words = (user?.all ?? []).sorted { $0.lowercased() < $1.lowercased() } }
     private var timer: Timer?
     func reload() {
         if mode != Settings.shared.mode { mode = Settings.shared.mode }
         systemAutocorrect = SystemAutocorrect.isOn
         perf = Settings.shared.perf
+        reloadWords()
         usage = usageSource?() ?? ""
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
@@ -97,6 +101,7 @@ struct SettingsView: View {
                     set: { off in SystemAutocorrect.set(!off); model.systemAutocorrect = SystemAutocorrect.isOn }))
                 Text("Apps that are already open may need a restart to notice.").font(.footnote).foregroundColor(.secondary)
             }
+            DictionarySection(model: model)
             PerformanceView(model: model)
             VStack(alignment: .leading, spacing: 6) {
                 Text("Other").font(.headline)
@@ -149,6 +154,42 @@ struct StatusView: View {
         }
         .padding(14)
         .frame(minWidth: 560, minHeight: 420)
+    }
+}
+
+/// The personal dictionary, right in Settings: words added with "Not a typo" (or learned from undos), never flagged.
+struct DictionarySection: View {
+    @ObservedObject var model: SettingsModel
+    @State private var newWord = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Personal dictionary").font(.headline)
+            Text("Never flagged or corrected. “Not a typo” adds a word here.").font(.footnote).foregroundColor(.secondary)
+            if model.words.isEmpty {
+                Text("No words yet.").foregroundColor(.secondary).padding(.vertical, 4)
+            } else {
+                List {
+                    ForEach(model.words, id: \.self) { w in
+                        HStack {
+                            Text(w)
+                            Spacer()
+                            Button("Remove") { model.user?.remove(w); model.reloadWords() }.buttonStyle(.borderless)
+                        }
+                    }
+                }
+                .frame(height: min(150, CGFloat(model.words.count) * 26 + 12))
+            }
+            HStack {
+                TextField("Add a word", text: $newWord).onSubmit(add)
+                Button("Add", action: add).disabled(newWord.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+    }
+
+    private func add() {
+        if model.user?.add(newWord.trimmingCharacters(in: .whitespaces)) == true { newWord = "" }
+        model.reloadWords()
     }
 }
 

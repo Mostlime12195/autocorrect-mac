@@ -5,6 +5,7 @@ import os
 struct PopoverActions {
     let pick: (String) -> Void
     let ignore: () -> Void
+    /// "Not a typo": the word goes in the personal dictionary
     let add: () -> Void
 }
 
@@ -185,8 +186,8 @@ final class Overlay {
             rows.append(PopoverRow(title: f, bold: true) { [weak self] in self?.closePopover(); actions.pick(f) })
         }
         let sep = rows.count
+        rows.append(PopoverRow(title: "Not a typo", bold: false) { [weak self] in self?.closePopover(); actions.add() })
         rows.append(PopoverRow(title: "Ignore", bold: false) { [weak self] in self?.closePopover(); actions.ignore() })
-        rows.append(PopoverRow(title: "Add “\(text)” to Dictionary", bold: false) { [weak self] in self?.closePopover(); actions.add() })
         let rowH: CGFloat = 24, pad: CGFloat = 5
         let w = max(170, rows.map { $0.idealWidth }.max() ?? 0)
         let h = CGFloat(rows.count) * rowH + 2 * pad + (sep > 0 ? 9 : 0)

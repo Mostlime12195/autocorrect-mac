@@ -694,11 +694,31 @@ final class TextLayer {
         pills.removeAll { $0.id == rc.pillId }
         keepOnce = (rc.start + newLen - (rc.word as NSString).length, rc.word)
         prev = nil
-        // same as backspace-undo on Android: that edit needs more evidence for a week (and a non-word typed on purpose
-        // goes in the personal dictionary)
-        engine.user.suppress(rc.learnTyped, rc.out)
-        input.learn(Undone(typed: rc.learnTyped, out: rc.out))
         pushOverlay()
+        // Learning waits a few seconds: an undo followed by retyping the same correction was an accident, not a
+        // rejection. Otherwise, as backspace-undo on Android: the edit needs more evidence for a week (and a non-word
+        // typed on purpose goes in the personal dictionary, unless it looks like a slip of a common word).
+        let undoneAt = Date().timeIntervalSince1970
+        let spot = rc.start
+        q.asyncAfter(deadline: .now() + 4) { [weak self] in
+            guard let self = self else { return }
+            let now = self.wordAt(f, spot)
+            if QualityGuard.accidentalUndo(undoneAt: undoneAt, now: Date().timeIntervalSince1970, wordNow: now, correction: rc.out, within: 5) {
+                self.input.debugNote("undo looked accidental (the correction was typed again): nothing learned")
+                return
+            }
+            self.engine.user.suppress(rc.learnTyped, rc.out)
+            self.input.learn(Undone(typed: rc.learnTyped, out: rc.out))
+        }
+    }
+
+    /// the whole word at (or touching) an offset in the field now
+    private func wordAt(_ f: AXField, _ at: Int) -> String? {
+        guard let s = f.snapshot(), at >= s.base, at <= s.end else { return nil }
+        var a = at, b = at
+        while a > s.base, let u = s.unit(a - 1), MarkTracker.isWordUnit(u) { a -= 1 }
+        while let u = s.unit(b), MarkTracker.isWordUnit(u) { b += 1 }
+        return b > a ? s.sub(NSRange(location: a, length: b - a)) : nil
     }
 
     // MARK: (a) preview while typing
