@@ -64,6 +64,25 @@ enum SelfTest {
                     if !ok { failed += 1 }
                     print("  \(ok ? "ok  " : "FAIL") word end '\(left) \(typed)': \(got) (want \(want)); margin \(String(format: "%.1f", o.margin))")
                 }
+                // non-word typos are fixed in every context; slang, names and odd casing are left alone
+                let consistent: [(String, String, String?)] = [
+                    ("can you", "hlep", "help"), ("I need some", "hlep", "help"), ("thanks for the", "hlep", "help"), ("", "hlep", "help"),
+                    ("I went home", "isnstead", "instead"), ("use this one", "isnstead", "instead"), ("we could walk", "isnstead", "instead"),
+                    ("", "Isnstead", "Instead"),
+                    ("haha", "lmao", nil), ("that's so funny", "lol", nil), ("it's cold", "brrr", nil), ("I'm", "gonna", nil),
+                    ("I love my", "iPhone", nil), ("I talked to", "Mazinga", nil), ("that was", "sooo", nil), ("lmao", "lllmo", nil),
+                ]
+                for (left, typed, want) in consistent {
+                    let r = try corr.correctWord(WordInput(typed: typed, left: left, sep: left.isEmpty ? "" : " "), scorer: sc,
+                                                 params: spec.standardParams, prev: nil)
+                    let o = WordOutcome(r, typedOOV: lex.index[typed.lowercased()] == nil)
+                    let d = Policy.boundary(o, mode: .auto, hasPrev: false, prevOut: nil, userWord: false, nameLike: Policy.nameLike(typed, left: left))
+                    var got = "kept"
+                    if case .apply(let out, _, _) = d { got = out } else if case .flag = d { got = "underlined" }
+                    let ok = want.map { got == $0 } ?? (got == "kept" || got == "underlined")
+                    if !ok { failed += 1 }
+                    print("  \(ok ? "ok  " : "FAIL") auto '\(left) \(typed)' -> \(got) (want \(want ?? "left alone")); margin \(String(format: "%.1f", o.margin))")
+                }
                 // stage (c): the idle sentence pass, with right context
                 t0 = Date()
                 let fixes = try SentenceCheck.check(corr, SentenceReq(left: "", sentence: "can you send me teh file when you get a chance."),

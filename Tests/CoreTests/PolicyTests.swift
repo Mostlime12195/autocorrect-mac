@@ -66,3 +66,43 @@ final class PolicyTests: XCTestCase {
         XCTAssertFalse(Policy.isSpellingEdit("alot", "a lot", typedOOV: true))
     }
 }
+
+final class NonWordPolicyTests: XCTestCase {
+    func o(_ typed: String, _ out: String, margin: Double, fixes: [String], fixGap: Double = 5, oov: Bool = true) -> WordOutcome {
+        WordOutcome(typed: typed, out: out, margin: margin, gap: 1.5, fixes: fixes, typedOOV: oov, fixGap: fixGap)
+    }
+
+    func testNonWordIsFixedWhateverTheMargin() {
+        // the diag case: "underlined, 3 fixes (margin 0.1, gap 1.5)"
+        XCTAssertEqual(Policy.boundary(o("hlep", "help", margin: 0.1, fixes: ["help", "held", "heap"], fixGap: 2), mode: .auto,
+                                       hasPrev: false, prevOut: nil, userWord: false), .apply(out: "help", prevNew: nil, merged: false))
+        // even when the LM kept the typed non-word
+        XCTAssertEqual(Policy.boundary(o("isnstead", "isnstead", margin: 0.3, fixes: ["instead"]), mode: .auto,
+                                       hasPrev: false, prevOut: nil, userWord: false), .apply(out: "instead", prevNew: nil, merged: false))
+    }
+
+    func testTrulyAmbiguousIsUnderlined() {
+        let d = Policy.boundary(o("hwat", "what", margin: 0.2, fixes: ["what", "hat"], fixGap: 0.4), mode: .auto, hasPrev: false, prevOut: nil, userWord: false)
+        XCTAssertEqual(d, .flag(fixes: ["what", "hat"], spelling: true))
+    }
+
+    func testProtectedWordsStay() {
+        let base = { (t: String) in self.o(t, t, margin: 0.5, fixes: ["fix"]) }
+        XCTAssertEqual(Policy.nonWord(o("brrr", "brrr", margin: 0, fixes: ["brr"]), nameLike: false), .notApplicable)   // stretched
+        XCTAssertEqual(Policy.nonWord(o("iPhone", "iPhone", margin: 0, fixes: ["phone"]), nameLike: false), .notApplicable)   // mixed case
+        XCTAssertEqual(Policy.nonWord(o("NASA", "NASA", margin: 0, fixes: ["NASAL"]), nameLike: false), .notApplicable)   // all caps
+        XCTAssertEqual(Policy.nonWord(o("Mazinga", "Mazinga", margin: 0, fixes: ["Masinga"]), nameLike: true), .notApplicable)   // a name
+        XCTAssertEqual(Policy.nonWord(o("lol", "lol", margin: 0, fixes: ["low"]), nameLike: false), .notApplicable)   // short
+        XCTAssertEqual(Policy.nonWord(o("kubectl", "kubectl", margin: 0, fixes: ["kubelet"]), nameLike: false), .notApplicable)   // 2 edits
+        XCTAssertEqual(Policy.nonWord(o("gonna", "gonna", margin: 0, fixes: ["gone"], oov: false), nameLike: false), .notApplicable)   // a word
+        // personal dictionary / Not a typo
+        XCTAssertEqual(Policy.boundary(base("hlep"), mode: .auto, hasPrev: false, prevOut: nil, userWord: true), .keep)
+    }
+
+    func testNameLike() {
+        XCTAssertTrue(Policy.nameLike("Mazinga", left: "I talked to"))
+        XCTAssertFalse(Policy.nameLike("Hlep", left: ""))
+        XCTAssertFalse(Policy.nameLike("Hlep", left: "ok."))
+        XCTAssertFalse(Policy.nameLike("hlep", left: "I need"))
+    }
+}

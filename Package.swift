@@ -34,7 +34,7 @@ let package = Package(
         ),
         .testTarget(
             name: "EngineTests",
-            dependencies: ["Engine"],
+            dependencies: ["Engine", "KeylimeCore"],
             path: "Tests/EngineTests",
             resources: [.copy("Fixtures")]
         ),

@@ -530,8 +530,9 @@ final class TextLayer {
             used = p
         }
         prev = nil
+        let nameLike = Policy.nameLike(word, left: left)
         engine.correctWord(input, prev: pw, merge: merge) { [weak self] r, inLex in
-            self?.q.async { self?.resolved(f, word, sep, start, seq, r, inLex, used) }
+            self?.q.async { self?.resolved(f, word, sep, start, seq, r, inLex, used, nameLike) }
         }
         // Performance: also re-check the sentence every N words (queued after this word's own correction)
         let n = settings.perf.everyWords
@@ -542,13 +543,13 @@ final class TextLayer {
     }
 
     private func resolved(_ f: AXField, _ word: String, _ sep: String, _ start: Int, _ seq: Int, _ r: WordResult?, _ inLex: Bool,
-                          _ used: PrevInfo?) {
+                          _ used: PrevInfo?, _ nameLike: Bool) {
         guard let r = r, f.same(field), usableField() != nil else { return }
         meter.record(.wordEnd, ms: r.ms, at: Date().timeIntervalSince1970)
         let o = WordOutcome(r, typedOOV: !inLex)
         let userWord = engine.user.has(word) || ignored.contains(word.lowercased())
         let d = Policy.boundary(o, mode: settings.mode, hasPrev: used != nil, prevOut: used?.out, userWord: userWord,
-                                penalty: { [engine] a, b in engine.user.penalty(a, b) })
+                                penalty: { [engine] a, b in engine.user.penalty(a, b) }, nameLike: nameLike)
         func setPrev(_ out: String, _ at: Int) {
             if sep == "\n" { prev = nil; return }
             prev = PrevInfo(slot: r.slot, idx: r.chosen, out: out, typed: word, lmScored: r.lmScored, margin: r.lmScored ? r.margin : 0,
@@ -839,7 +840,8 @@ final class TextLayer {
             self?.q.async {
                 guard let self = self, let r = r, self.seqNow == seq, f.same(self.field) else { return }
                 let d = Policy.boundary(WordOutcome(r, typedOOV: !inLex), mode: .auto, hasPrev: false, prevOut: nil, userWord: false,
-                                        penalty: { [engine = self.engine] x, y in engine.user.penalty(x, y) })
+                                        penalty: { [engine = self.engine] x, y in engine.user.penalty(x, y) },
+                                        nameLike: Policy.nameLike(word, left: left))
                 guard case .apply(let out, nil, false) = d, out.lowercased() != word.lowercased(),
                       let rect = f.bounds(NSRange(location: a, length: (word as NSString).length)) else { return }
                 self.preview = Preview(start: a, word: word, out: out)
