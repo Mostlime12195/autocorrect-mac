@@ -7,10 +7,10 @@ let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
 let ort = "\(root)/vendor/onnxruntime"
 
 let package = Package(
-    name: "Autocorrect",
+    name: "Keylime",
     platforms: [.macOS(.v13)],
     products: [
-        .executable(name: "Autocorrect", targets: ["AutocorrectApp"]),
+        .executable(name: "Keylime", targets: ["AutocorrectApp"]),
         .library(name: "AutocorrectEngine", targets: ["Engine"]),
     ],
     targets: [

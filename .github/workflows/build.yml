@@ -43,19 +43,45 @@ jobs:
         run: |
           if [[ "$GITHUB_REF" == refs/tags/mac-v* ]]; then echo "VERSION=${GITHUB_REF#refs/tags/mac-v}" >> "$GITHUB_ENV"
           else echo "VERSION=0.0.${{ github.run_number }}" >> "$GITHUB_ENV"; fi
+      - name: Signing identity
+        env:
+          P12: ${{ secrets.MAC_SIGNING_P12 }}
+          P12_PASSWORD: ${{ secrets.MAC_SIGNING_PASSWORD }}
+        run: |
+          if [ -z "$P12" ]; then echo "no signing secret (fork PR): ad-hoc build"; exit 0; fi
+          KC="$RUNNER_TEMP/keylime.keychain-db"
+          KPW=$(openssl rand -hex 16)
+          echo "$P12" | base64 --decode > "$RUNNER_TEMP/k.p12"
+          security create-keychain -p "$KPW" "$KC"
+          security set-keychain-settings -lut 3600 "$KC"
+          security unlock-keychain -p "$KPW" "$KC"
+          security import "$RUNNER_TEMP/k.p12" -k "$KC" -P "$P12_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/k.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KPW" "$KC" >/dev/null
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          security find-identity -p codesigning "$KC"
+          SHA=$(security find-certificate -c "Keylime Self-Signed" -Z "$KC" | awk '/SHA-1/ {print $NF}')
+          echo "SIGN_IDENTITY=$SHA" >> "$GITHUB_ENV"
       - name: Build app
         run: scripts/build_app.sh "$VERSION" "${{ github.run_number }}"
+      - name: Designated requirement is the certificate, not a cdhash
+        if: env.SIGN_IDENTITY != ''
+        run: |
+          codesign -d -r- dist/Keylime.app 2>&1 | tee dr.txt
+          grep -q 'designated => identifier "dev.mostlime.autocorrect-mac" and certificate leaf = H"' dr.txt
+          ! grep -q cdhash dr.txt
+          codesign -dvv dist/Keylime.app 2>&1 | grep -E "Authority|Identifier|TeamIdentifier"
       - name: Self-test the bundled app
-        run: dist/Autocorrect.app/Contents/MacOS/Autocorrect --selftest models
+        run: dist/Keylime.app/Contents/MacOS/Keylime --selftest models
       - uses: actions/upload-artifact@v4
         with:
-          name: Autocorrect-mac-${{ env.VERSION }}
+          name: Keylime-mac-${{ env.VERSION }}
           path: dist/*.zip
       - name: Release
         if: startsWith(github.ref, 'refs/tags/mac-v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/Autocorrect-mac-$VERSION.zip --title "Autocorrect for Mac $VERSION" \
-            --notes "Ad-hoc signed, not notarized: see the README for first launch." || \
-          gh release upload "$GITHUB_REF_NAME" dist/Autocorrect-mac-$VERSION.zip --clobber
+          gh release create "$GITHUB_REF_NAME" dist/Keylime-mac-$VERSION.zip --title "Keylime for Mac $VERSION" \
+            --notes "Self-signed, not notarized: see the README for first launch." || \
+          gh release upload "$GITHUB_REF_NAME" dist/Keylime-mac-$VERSION.zip --clobber

@@ -5,13 +5,13 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleExecutable</key>
-	<string>Autocorrect</string>
+	<string>Keylime</string>
 	<key>CFBundleIdentifier</key>
 	<string>dev.mostlime.autocorrect-mac</string>
 	<key>CFBundleName</key>
-	<string>Autocorrect</string>
+	<string>Keylime</string>
 	<key>CFBundleDisplayName</key>
-	<string>Autocorrect</string>
+	<string>Keylime</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -27,6 +27,6 @@
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSHumanReadableCopyright</key>
-	<string>On-device autocorrect. Models CC BY 4.0.</string>
+	<string>Keylime: on-device autocorrect. Models CC BY 4.0.</string>
 </dict>
 </plist>
