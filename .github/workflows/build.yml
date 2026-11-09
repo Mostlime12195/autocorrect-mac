@@ -1,0 +1,58 @@
+name: build
+on:
+  push:
+    branches: [main]
+    tags: ['mac-v*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: swift --version && sw_vers && sysctl -n machdep.cpu.brand_string
+      - uses: actions/cache@v4
+        with:
+          path: vendor/onnxruntime
+          key: ort-1.31.1-osx-arm64
+      - run: scripts/fetch_ort.sh
+      - uses: actions/cache@v4
+        with:
+          path: models
+          key: models-style1-v1
+      - name: Models for the parity tests
+        run: scripts/fetch_models.sh models
+      - name: Unit and parity tests
+        env:
+          AC_MODEL_DIR: ${{ github.workspace }}/models
+          AC_REQUIRE_MODELS: '1'
+        run: swift test -c release -Xswiftc -enable-testing 2>&1 | tee test.log
+      - name: Parity summary
+        if: always()
+        run: grep -E "identical|cases|slots|corrector vs|onnxruntime|Executed|error:|failed" test.log | grep -v "^  " | head -40 || true
+      - name: Version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/mac-v* ]]; then echo "VERSION=${GITHUB_REF#refs/tags/mac-v}" >> "$GITHUB_ENV"
+          else echo "VERSION=0.0.${{ github.run_number }}" >> "$GITHUB_ENV"; fi
+      - name: Build app
+        run: scripts/build_app.sh "$VERSION" "${{ github.run_number }}"
+      - name: Self-test the bundled app
+        run: dist/Autocorrect.app/Contents/MacOS/Autocorrect --selftest models
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Autocorrect-mac-${{ env.VERSION }}
+          path: dist/*.zip
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/mac-v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/Autocorrect-mac-$VERSION.zip --title "Autocorrect for Mac $VERSION" \
+            --notes "Ad-hoc signed, not notarized: see the README for first launch." || \
+          gh release upload "$GITHUB_REF_NAME" dist/Autocorrect-mac-$VERSION.zip --clobber

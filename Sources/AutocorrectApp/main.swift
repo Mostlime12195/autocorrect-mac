@@ -1,0 +1,11 @@
+import AppKit
+
+if CommandLine.arguments.contains("--selftest") {
+    exit(SelfTest.run(CommandLine.arguments))
+}
+
+let app = NSApplication.shared
+let delegate = AppDelegate()
+app.delegate = delegate
+app.setActivationPolicy(.accessory)
+app.run()

@@ -1,0 +1,41 @@
+// swift-tools-version: 5.9
+import PackageDescription
+import Foundation
+
+// onnxruntime: the official macOS arm64 build (C API), fetched by scripts/fetch_ort.sh into vendor/onnxruntime.
+let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
+let ort = "\(root)/vendor/onnxruntime"
+
+let package = Package(
+    name: "Autocorrect",
+    platforms: [.macOS(.v13)],
+    products: [
+        .executable(name: "Autocorrect", targets: ["AutocorrectApp"]),
+        .library(name: "AutocorrectEngine", targets: ["Engine"]),
+    ],
+    targets: [
+        .target(
+            name: "COrt",
+            path: "Sources/COrt",
+            cSettings: [.unsafeFlags(["-I\(ort)/include"])],
+            linkerSettings: [.unsafeFlags([
+                "-L\(ort)/lib", "-lonnxruntime",
+                "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks",
+                "-Xlinker", "-rpath", "-Xlinker", "\(ort)/lib",
+            ])]
+        ),
+        .target(name: "Engine", dependencies: ["COrt"], path: "Sources/Engine"),
+        .executableTarget(
+            name: "AutocorrectApp",
+            dependencies: ["Engine"],
+            path: "Sources/AutocorrectApp",
+            linkerSettings: [.linkedFramework("AppKit"), .linkedFramework("Carbon"), .linkedFramework("ApplicationServices")]
+        ),
+        .testTarget(
+            name: "EngineTests",
+            dependencies: ["Engine"],
+            path: "Tests/EngineTests",
+            resources: [.copy("Fixtures")]
+        ),
+    ]
+)
