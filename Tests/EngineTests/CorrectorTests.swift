@@ -86,12 +86,12 @@ final class CorrectorTests: XCTestCase {
     func testPersonalDictionaryAndSuppression() throws {
         var t = 1000.0
         let u = UserData(dict: nil, learn: nil, now: { t })
-        u.add("Kubernetes")
+        u.add("Zorblaxian")
         let c = corr(user: u)
-        let r = try c.correctWord(WordInput(typed: "kubernetes", left: "", sep: ""), scorer: FakeLm.liking(" nothing"), params: p, prev: nil)
-        XCTAssertEqual(r.out, "kubernetes")
-        // near-miss typo of a dictionary word becomes a candidate
-        XCTAssertTrue(c.candidates("kubernets", nil).cands.contains("Kubernetes"))
+        let r = try c.correctWord(WordInput(typed: "zorblaxian", left: "", sep: ""), scorer: FakeLm.liking(" nothing"), params: p, prev: nil)
+        XCTAssertEqual(r.out, "zorblaxian")
+        // near-miss typo of a dictionary word (not in the lexicon) becomes a candidate
+        XCTAssertTrue(c.candidates("zorblaxin", nil).cands.contains("Zorblaxian"))
         // a suppressed edit needs 3 nats more: make "the" win by 1.5
         let w = WordInput(typed: "teh", left: "a", sep: " ")
         let r0 = try c.correctWord(w, scorer: FakeLm { reqs in reqs.map { $0.cont == " the" ? -2.0 : ($0.cont == " teh" ? -9.0 : -40.0) } },

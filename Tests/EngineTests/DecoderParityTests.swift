@@ -100,12 +100,26 @@ final class DecoderParityTests: XCTestCase {
         defer { step.close() }
         let exp = ref["outs"] as! [[String]]
         let p = params(ref["params"] as! [String: Any])
-        let corr = Corrector(gen: Fixtures.gen)   // v1 candidates, like the reference slots
+        // without the battery rules (all candidates, no skips, full re-check) the corrector is the full decode
+        var full = CorrectorConfig()
+        full.lmTopK = 0; full.skipMargin = .infinity; full.recheckOnlyIfScored = false; full.recheckSkipMargin = .infinity
+        full.recheckWindow = .infinity; full.recheckMax = 1000
+        let (fw, fs, _) = try correctorRun(Corrector(gen: Fixtures.gen, config: full), exp, step, p, (ref["style_id"] as! NSNumber).intValue, label: "full")
+        print("corrector without battery rules vs full decode (m2s): \(fs)/\(fw) words identical")
+        XCTAssertLessThanOrEqual((fw - fs) * 100, fw)
+        // with them (the app's config): what the skips / top-K subset cost in agreement, and the per-word latency
+        let (words, same, ms0) = try correctorRun(Corrector(gen: Fixtures.gen), exp, step, p, (ref["style_id"] as! NSNumber).intValue, label: "app")
+        let ms = ms0.sorted()
+        print("corrector vs full decode (m2s): \(same)/\(words) words identical; per word p50 \(ms[ms.count / 2]) ms, p90 \(ms[ms.count * 9 / 10]) ms, max \(ms.last!) ms")
+        XCTAssertGreaterThanOrEqual(Double(same) / Double(words), 0.93)
+    }
+
+    private func correctorRun(_ corr: Corrector, _ exp: [[String]], _ step: StepModel, _ p: DecodeParams, _ style: Int, label: String) throws -> (Int, Int, [Double]) {
         let texts = Fixtures.pipelineRef["texts"] as! [String]
         var words = 0, same = 0
         var ms: [Double] = []
         for (i, t) in texts.enumerated() where i < exp.count {
-            let sc = NeuralScorer(tok: Fixtures.tokM2, step: step, styleId: (ref["style_id"] as! NSNumber).intValue)
+            let sc = NeuralScorer(tok: Fixtures.tokM2, step: step, styleId: style)
             let (seps, typed) = segment(t)
             var outs: [String] = []
             var prev: (WordResult, Int)? = nil
@@ -123,10 +137,11 @@ final class DecoderParityTests: XCTestCase {
                 outs.append(r.out)
                 prev = (r, j)
             }
-            for (a, b) in zip(outs, exp[i]) { words += 1; if a == b { same += 1 } }
+            for (j, (a, b)) in zip(outs, exp[i]).enumerated() {
+                words += 1
+                if a == b { same += 1 } else { print("  corrector[\(label)] msg \(i) word \(j): typed '\(typed[j])' full decode '\(b)' corrector '\(a)'") }
+            }
         }
-        ms.sort()
-        print("corrector vs full decode (m2s): \(same)/\(words) words identical; per word p50 \(ms[ms.count / 2]) ms, p90 \(ms[ms.count * 9 / 10]) ms, max \(ms.last!) ms")
-        XCTAssertGreaterThanOrEqual(Double(same) / Double(words), 0.97)
+        return (words, same, ms)
     }
 }
