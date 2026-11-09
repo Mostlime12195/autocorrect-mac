@@ -49,7 +49,7 @@ final class FocusTrackerTests: XCTestCase {
         h.probe(nil, 1, .answers)
         h.probe(nil, 2.5, .answers)
         XCTAssertEqual(h.path, "ax")
-        h.probe(nil, 3.2, .answers)   // > 3 s of failures in a row, focus never confirmed
+        h.probe(nil, 4.1, .answers)   // > 3 s since the first failure in a row, focus never confirmed
         XCTAssertEqual(h.path, "keys")
 
         let d = Host()
