@@ -275,6 +275,19 @@ final class InputController {
         drainAndPost()
     }
 
+    /// Text layer, inside `gate`: type text as tagged keys (they pass the tap untouched; real keys stay held)
+    func typeTagged(_ s: String) {
+        lock.lock()
+        var evs: [CGEvent] = []
+        for ch in s {
+            let code = layout.keyCodes[Character(ch.lowercased())] ?? (ch == " " ? CGKeyCode(kVK_Space) : 0)
+            evs += key(code, String(ch))
+        }
+        for e in evs { e.setIntegerValueField(.eventSourceUserData, value: Self.MAGIC) }   // seq 0: never an awaited echo
+        lock.unlock()
+        for e in evs { e.post(tap: .cghidEventTap); usleep(2000) }
+    }
+
     /// Text layer: type a backspace (a swallowed one whose AX undo didn't work)
     func postBackspace() {
         lock.lock()

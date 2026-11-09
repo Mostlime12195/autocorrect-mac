@@ -14,6 +14,8 @@ final class AXField {
     var lastWrite = ""
     /// the bounds source that last worked here (BoundsSession)
     var boundsSource: String?
+    /// the last replace got the word selected (so typing over it would work)
+    var lastSelectionOK = false
 
     /// parameterized attributes the element offers (for the status window)
     var parameterizedNames: [String] {
@@ -217,6 +219,7 @@ final class AXField {
     /// changed: the text isn't what we expected (leave it alone).
     func replace(_ r: NSRange, old: String, new: String) -> Write {
         // keys already delivered may still be landing (Chromium updates its tree late): wait for a stable caret
+        lastSelectionOK = false
         guard var sel = selection else { return .unsupported }
         for _ in 0..<4 {
             usleep(8_000)
@@ -232,6 +235,7 @@ final class AXField {
         var selected = selection == r
         for _ in 0..<15 where !selected { usleep(10_000); selected = selection == r }
         if !selected { setSelection(sel); lastWrite = "selection never took (\(String(describing: selection)) != \(r))"; return .unsupported }
+        lastSelectionOK = true
         guard setSelectedText(new) else { setSelection(sel); lastWrite = "setting the selected text failed"; return .unsupported }
         let nr = NSRange(location: r.location, length: (new as NSString).length)
         var landed = read(nr) == new
@@ -252,6 +256,33 @@ final class AXField {
         if read(r) == old { setSelection(sel); lastWrite = "the new text never showed up"; return .unsupported }
         lastWrite = "text after the write isn't what we wrote"
         return .changed
+    }
+
+    /// The fallback for editors that ignore AXSelectedText: select the word through AX, type the replacement over the
+    /// selection (keys from `type`, while the user's keys are held), verify, put the caret back.
+    func replaceByTyping(_ r: NSRange, old: String, new: String, type: (String) -> Void) -> Write {
+        guard let sel = selection else { lastWrite = "typed: no selection"; return .unsupported }
+        guard read(r) == old else { lastWrite = "typed: text changed under us"; return .changed }
+        guard setSelection(r) else { lastWrite = "typed: setting the selection failed"; return .unsupported }
+        var selected = selection == r
+        for _ in 0..<15 where !selected { usleep(10_000); selected = selection == r }
+        guard selected else { setSelection(sel); lastWrite = "typed: selection never took"; return .unsupported }
+        type(new)
+        let nr = NSRange(location: r.location, length: (new as NSString).length)
+        var landed = read(nr) == new
+        for _ in 0..<16 where !landed { usleep(25_000); landed = read(nr) == new }
+        guard landed else {
+            if read(r) == old { setSelection(sel); lastWrite = "typed: nothing changed"; return .unsupported }
+            lastWrite = "typed: text after typing isn't what we typed"
+            return .changed
+        }
+        var caret = sel
+        if sel.location >= NSMaxRange(r) { caret.location += nr.length - r.length } else if sel.location > r.location { caret = NSRange(location: NSMaxRange(nr), length: 0) }
+        setSelection(caret)
+        var back = selection == caret
+        for _ in 0..<5 where !back { usleep(10_000); back = selection == caret; if !back { setSelection(caret) } }
+        lastWrite = back ? "ok (typed over the selection)" : "ok (typed), caret restore unconfirmed"
+        return .ok
     }
 
     // MARK: snapshots

@@ -29,6 +29,8 @@ final class TextLayer {
     static let IDLE_CHARS = 2000
     static let IDLE_LEFT = 200
     static let IDLE_SENTENCES = 6
+    /// a mark whose word can't be found survives this long (apps re-rendering report stale / empty text)
+    static let MARK_GRACE = 0.8
 
     // MARK: shared with the tap thread (lock)
 
@@ -55,6 +57,8 @@ final class TextLayer {
     private var dBounds = "no marks queried yet"
     private var dPids = "no field yet"
     private var dTest = "not run"
+    private var dClick = "none yet"
+    private var rectCache: [Int: (rect: CGRect, start: Int, frame: CGRect?)] = [:]
     private var dParams = "?"
     private var dSource = "none yet"
     private var paramsFor: AXField?
@@ -165,7 +169,7 @@ final class TextLayer {
     }
 
     /// tap thread
-    func scrolled() { q.async { self.scheduleRefresh(after: 0.06) } }
+    func scrolled() { q.async { self.rectCache.removeAll(); self.scheduleRefresh(after: 0.06) } }
 
     /// main
     func appActivated(_ app: NSRunningApplication) {
@@ -236,12 +240,41 @@ final class TextLayer {
 
     private func clicked(_ p: CGPoint) {
         lock.lock()
-        let hit = markHits.last { $0.rect.insetBy(dx: -1, dy: -3).contains(p) }
+        let hits = markHits
+        let hit = hits.last { $0.rect.insetBy(dx: -1, dy: -3).contains(p) }
         lock.unlock()
         closePopover()
-        guard let h = hit else { return }
-        // after the click has put the caret there
-        q.asyncAfter(deadline: .now() + 0.12) { self.showPopover(h.id) }
+        let near = hits.min { Self.dist($0.rect, p) < Self.dist($1.rect, p) }
+        let at = "(\(Int(p.x)), \(Int(p.y)))"
+        if let h = hit {
+            noteClick("\(at) hit a mark at \(NSStringFromRect(h.rect)); opening fixes")
+            // after the click has put the caret there; placed from the rect that was drawn (re-asking for bounds can
+            // fail once the caret is inside the word)
+            q.asyncAfter(deadline: .now() + 0.12) { self.showPopover(h.id, at: h.rect) }
+        } else if let n = near {
+            noteClick("\(at) missed; nearest of \(hits.count) mark(s) at \(NSStringFromRect(n.rect)), \(Int(Self.dist(n.rect, p))) pt away")
+        } else {
+            noteClick("\(at) missed; no marks drawn")
+        }
+    }
+
+    private static func dist(_ r: CGRect, _ p: CGPoint) -> CGFloat {
+        let dx = max(r.minX - p.x, 0, p.x - r.maxX), dy = max(r.minY - p.y, 0, p.y - r.maxY)
+        return (dx * dx + dy * dy).squareRoot()
+    }
+
+    private func noteClick(_ s: String) {
+        let t = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+        lock.lock(); dClick = "\(t): \(s)"; lock.unlock()
+        log.info("click: \(s, privacy: .public)")
+        input.debugNote("click: " + s)
+    }
+
+    /// marks went away: say why in the recent events
+    private func noteDropped(_ n: Int, _ why: String) {
+        guard n > 0 else { return }
+        input.debugNote("marks: \(n) removed (\(why))")
+        log.info("\(n) mark(s) removed: \(why, privacy: .public)")
     }
 
     // MARK: field
@@ -350,7 +383,8 @@ final class TextLayer {
         if f == nil { focus.reset() }
         if field == nil && f == nil { updateMode(nil); return }
         lock.lock(); dMarks = 0; lock.unlock()
-        tracker.removeAll(); pills.removeAll(); recents.removeAll(); prev = nil; keepOnce = nil
+        noteDropped(tracker.marks.count, f == nil ? "field lost or app switched" : "focus moved to another field")
+        tracker.removeAll(); pills.removeAll(); recents.removeAll(); prev = nil; keepOnce = nil; rectCache.removeAll()
         hidePreview(); closePopover()
         field = f
         updateMode(f)
@@ -517,6 +551,12 @@ final class TextLayer {
     private func write(_ f: AXField, _ r: NSRange, old: String, new: String) -> AXField.Write {
         var res = AXField.Write.changed
         input.gate { res = f.replace(r, old: old, new: new) }
+        // editors that take a selection but ignore AXSelectedText (Slate in Discord): type over the selection
+        if res == .unsupported && f.lastSelectionOK {
+            let first = f.lastWrite
+            input.gate { res = f.replaceByTyping(r, old: old, new: new) { self.input.typeTagged($0) } }
+            f.lastWrite += " (AX write: \(first))"
+        }
         lock.lock(); dWrite = "\(res): \(f.lastWrite)"; lock.unlock()
         if res != .ok { log.notice("write \(String(describing: res), privacy: .public): \(f.lastWrite, privacy: .public)") }
         return res
@@ -694,7 +734,9 @@ final class TextLayer {
                     let b = batch[j]
                     self.cache(b.key, fixes)
                     let s0 = winBase + offs[b.range.lowerBound], s1 = winBase + offs[b.range.upperBound]
+                    let before = self.tracker.marks.count
                     self.tracker.removeAll(in: s0..<s1)
+                    self.noteDropped(before - self.tracker.marks.count, "sentence re-checked")
                     let current = b.range.lowerBound <= caretChar && caretChar <= b.range.upperBound
                     for (fx, spelling) in fixes {
                         let a = winBase + offs[b.range.lowerBound + fx.start]
@@ -740,11 +782,12 @@ final class TextLayer {
 
     // MARK: popover
 
-    private func showPopover(_ id: Int) {
-        guard let f = field, let m = tracker.mark(id: id), let snap = f.snapshot(),
-              snap.sub(NSRange(location: m.start, length: m.length)) == m.word,
-              let rect = f.bounds(NSRange(location: m.start, length: m.length)) else { return }
+    private func showPopover(_ id: Int, at rect: CGRect) {
+        guard field != nil else { noteClick("popover not shown: no field any more"); return }
+        guard let m = tracker.mark(id: id) else { noteClick("popover not shown: the mark was removed after the click"); return }
+        guard !m.fixes.isEmpty else { noteClick("popover not shown: the mark has no fixes"); return }
         popoverMark = id
+        noteClick("popover shown for a mark with \(m.fixes.count) fix(es)")
         let actions = PopoverActions(
             pick: { [weak self] s in self?.q.async { self?.applyFix(id, s) } },
             ignore: { [weak self] in self?.q.async { self?.ignore(id) } },
@@ -814,6 +857,7 @@ final class TextLayer {
             "Bounds source in use: \(dSource)",
             "Field parameterized attributes: \(dParams)",
             "Test underline: \(dTest)",
+            "Last click: \(dClick)",
         ].joined(separator: "\n")
     }
 
@@ -870,13 +914,16 @@ final class TextLayer {
     private func refresh() {
         let now = Date()
         if settings.mode == .off || settings.isExcluded(input.frontmostBundleId) {
+            noteDropped(tracker.marks.count, "mode is Off or app paused")
             tracker.removeAll(); pills.removeAll(); recents.removeAll()
         }
         pills.removeAll { $0.until < now }
         let lastId = recents.last?.pillId
         recents.removeAll { $0.until < now && $0.pillId != lastId }
         if let f = field, !(tracker.isEmpty && pills.isEmpty), let snap = f.snapshot() {
-            tracker.reconcile(snap.text, base: snap.base)
+            let gone = tracker.reconcile(snap.text, base: snap.base, now: now.timeIntervalSince1970, grace: Self.MARK_GRACE)
+            noteDropped(gone.count, "word changed or gone from the text for \(Self.MARK_GRACE) s")
+            for id in gone { rectCache[id] = nil }
             pills.removeAll { snap.sub($0.range) != $0.text }
         }
         pushOverlay()
@@ -897,6 +944,7 @@ final class TextLayer {
         }
         var boundsNote: String? = nil
         var hidden = 0
+        var cached = 0
         if let f = field, owned(f, by: front), mode == .ax, !(tracker.isEmpty && pills.isEmpty) {
             let visible = f.visibleFrame()
             let session = BoundsSession(f)
@@ -908,7 +956,16 @@ final class TextLayer {
                 let (b, detail) = session.bounds(NSRange(location: m.start, length: m.length), all: first && f.boundsSource == nil)
                 first = false
                 boundsNote = detail
-                guard let r = b else { continue }
+                // keep the last good rect while the text under it and the field's frame haven't changed (sources
+                // like the caret only cover one line; apps re-render)
+                var rr = b
+                if let r = b {
+                    rectCache[m.id] = (r, m.start, visible)
+                } else if let c = rectCache[m.id], c.start == m.start, c.frame == visible {
+                    rr = c.rect
+                    cached += 1
+                }
+                guard let r = rr else { continue }
                 if let v = visible, !v.intersects(r) { hidden += 1; continue }
                 items.append(.mark(r, spelling: m.spelling))
                 mh.append((r, m.id))
@@ -926,7 +983,7 @@ final class TextLayer {
             if !owned(f, by: front) { why = "focused field isn't in the frontmost app (field pid \(f.pid) \(bundle(f.pid)), frontmost pid \(front) \(bundle(front)))" }
             else if mode != .ax { why = "not on the accessibility path" }
             else if tracker.isEmpty && pills.isEmpty { why = "no marks" }
-            else { why = "\(items.count) of \(tracker.marks.count + pills.count) drawn, \(hidden) outside the visible field" }
+            else { why = "\(items.count) of \(tracker.marks.count + pills.count) drawn (\(cached) from the last good position), \(hidden) outside the visible field" }
         } else { why = "no field" }
         if let n = boundsNote, n.hasPrefix("no source") { log.notice("bounds failed: \(n, privacy: .public)") }
         lock.lock()
