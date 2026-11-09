@@ -110,7 +110,8 @@ public final class TypingCore {
 
     /// One key. canCorrect: the app allows corrections right now (enabled, model ready, app not excluded, no secure input).
     public func key(_ k: KeyInput, canCorrect: Bool) -> KeyDecision {
-        precondition(pending == nil, "keys must be queued while a correction is pending")
+        // the host queues keys while a correction is pending; never crash the tap if that's violated
+        if pending != nil { return .pass }
         switch k {
         case .reset:
             reset(); return .pass

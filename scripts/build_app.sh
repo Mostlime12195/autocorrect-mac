@@ -14,7 +14,9 @@ cp "$BIN" "$APP/Contents/MacOS/Autocorrect"
 sed -e "s/__VERSION__/$V/" -e "s/__BUILD__/$B/" App/Info.plist > "$APP/Contents/Info.plist"
 cp Resources/lexicon.tsv "$APP/Contents/Resources/"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/" 2>/dev/null || true
-cp vendor/onnxruntime/lib/libonnxruntime.*.*.*.dylib "$APP/Contents/Frameworks/"
+# under the name the binary links (@rpath/libonnxruntime.1.dylib), as one real file
+NEED=$(otool -L "$APP/Contents/MacOS/Autocorrect" | awk '/libonnxruntime/ {print $1}' | sed 's#@rpath/##')
+cp -L vendor/onnxruntime/lib/libonnxruntime.*.*.*.dylib "$APP/Contents/Frameworks/$NEED"
 cp vendor/onnxruntime/LICENSE "$APP/Contents/Resources/onnxruntime-LICENSE.txt"
 # the build-tree rpath isn't wanted in the shipped binary
 ORT_LIB="$(pwd)/vendor/onnxruntime/lib"
