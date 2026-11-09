@@ -57,14 +57,14 @@ public enum Scrub {
     /// the 2 tokens right before the word (same line), each scrubbed; dropped ones aren't replaced by older words
     public static func before(_ text: String?) -> [String] {
         guard let text = text, !text.isEmpty else { return [] }
-        let line = text.split(separator: "\n", omittingEmptySubsequences: false).last ?? Substring(text)
+        let line = text.split(omittingEmptySubsequences: false, whereSeparator: { $0.isNewline }).last ?? Substring(text)
         return tokens(line).suffix(2).compactMap(contextToken)
     }
 
     /// the token right after the word (same line), scrubbed
     public static func after(_ text: String?) -> [String] {
         guard let text = text, !text.isEmpty else { return [] }
-        let line = text.split(separator: "\n", omittingEmptySubsequences: false).first ?? Substring(text)
+        let line = text.split(omittingEmptySubsequences: false, whereSeparator: { $0.isNewline }).first ?? Substring(text)
         guard let first = tokens(line).first, let t = contextToken(first) else { return [] }
         return [t]
     }
@@ -124,6 +124,12 @@ public struct CorrectionDecision {
 
 public enum CorrectionEvents {
     public static let platform = "mac"
+
+    /// The Mac's field check: nothing is recorded from a secure (password) field, while secure input is on, or in an
+    /// excluded app. (It can't tell email / URL / number fields apart; the token rules still drop those tokens.)
+    public static func recordable(secureField: Bool, secureInput: Bool, excludedApp: Bool) -> Bool {
+        !secureField && !secureInput && !excludedApp
+    }
     static let outcomes: Set<String> = ["auto_applied_kept", "auto_applied_undone", "suggestion_picked", "suggestion_ignored",
                                         "not_a_typo", "manual_fix"]
     static let kinds: Set<String> = ["spelling", "real_word", "grammar", "punctuation"]
