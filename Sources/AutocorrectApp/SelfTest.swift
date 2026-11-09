@@ -1,7 +1,8 @@
 import Engine
 import Foundation
+import KeylimeCore
 
-/// `Autocorrect --selftest <model dir>`: the bundled app end to end without the UI (CI runs it on the built .app):
+/// `Keylime --selftest <model dir>`: the bundled app end to end without the UI (CI runs it on the built .app):
 /// lexicon from the bundle, onnxruntime from Contents/Frameworks, the model from the dir (manifest.json + files).
 enum SelfTest {
     static func run(_ args: [String]) -> Int32 {
@@ -47,12 +48,58 @@ enum SelfTest {
                     if !ok { failed += 1 }
                     print("  \(ok ? "ok  " : "FAIL") '\(typed)' -> '\(shown)' (want '\(want)'); ms/word \(ms.map { String(format: "%.0f", $0) }.joined(separator: " "))")
                 }
+                // stage (b): what a finished word does in each mode
+                for (left, typed, want) in [("can you send me", "teh", "auto=apply suggest=flag"), ("thanks for the", "help", "auto=keep suggest=keep")] {
+                    let r = try corr.correctWord(WordInput(typed: typed, left: left, sep: " "), scorer: sc, params: spec.standardParams, prev: nil)
+                    let o = WordOutcome(r, typedOOV: lex.index[typed] == nil)
+                    func name(_ m: CorrectionMode) -> String {
+                        switch Policy.boundary(o, mode: m, hasPrev: false, prevOut: nil, userWord: false) {
+                        case .keep: return "keep"
+                        case .apply: return "apply"
+                        case .flag: return "flag"
+                        }
+                    }
+                    let got = "auto=\(name(.auto)) suggest=\(name(.suggest))"
+                    let ok = got == want
+                    if !ok { failed += 1 }
+                    print("  \(ok ? "ok  " : "FAIL") word end '\(left) \(typed)': \(got) (want \(want)); margin \(String(format: "%.1f", o.margin))")
+                }
+                // stage (c): the idle sentence pass, with right context
+                t0 = Date()
+                let fixes = try SentenceCheck.check(corr, SentenceReq(left: "", sentence: "can you send me teh file when you get a chance."),
+                                                    scorer: sc, params: spec.standardParams, minGap: Policy.FLAG_MARGIN)
+                let ok = fixes.contains { $0.from == "teh" && $0.to == "the" } && fixes.count <= 2
+                if !ok { failed += 1 }
+                print("  \(ok ? "ok  " : "FAIL") idle pass: \(fixes.map { "\($0.from)->\($0.to) (\(String(format: "%.1f", $0.gap)))" }) in \(String(format: "%.0f", Date().timeIntervalSince(t0) * 1000)) ms")
                 step.close()
             }
+            failed += checkPieces()
             return failed == 0 ? 0 : 1
         } catch {
             print("FAIL: \(error)")
             return 1
         }
+    }
+
+    /// marks, update manifest, this bundle's signature (the updater's identity check)
+    static func checkPieces() -> Int {
+        var failed = 0
+        func check(_ ok: Bool, _ what: String) { if !ok { failed += 1 }; print("  \(ok ? "ok  " : "FAIL") \(what)") }
+        let t = MarkTracker()
+        t.add(start: 4, word: "teh", fixes: ["the"], spelling: true)
+        t.reconcile("oh, see teh cat")
+        check(t.marks.first?.start == 8, "marks follow the text")
+        let m = #"{"version":"9.9.9","url":"https://example.com/Keylime-mac-9.9.9.zip","sha256":"\#(String(repeating: "a", count: 64))","size":1}"#
+        check((try? UpdateCore.parse(Data(m.utf8)))?.version == "9.9.9" && UpdateCore.newer("9.9.9", than: Updater.currentVersion),
+              "update manifest parses and is newer than \(Updater.currentVersion)")
+        let req = CodeIdentity.ownRequirement() ?? "unsigned"
+        print("  designated requirement: \(req)")
+        let signed = !req.contains("cdhash") && req.contains("certificate leaf")
+        if ProcessInfo.processInfo.environment["KL_REQUIRE_SIGNED"] == "1" {
+            check(signed, "signed with the Keylime certificate")
+            check(CodeIdentity.mismatch(Bundle.main.bundleURL) == nil, "this bundle passes the updater's identity check")
+        }
+        print("  system autocorrect is \(SystemAutocorrect.isOn ? "on" : "off")")
+        return failed
     }
 }

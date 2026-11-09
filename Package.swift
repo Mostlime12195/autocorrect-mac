@@ -25,9 +25,10 @@ let package = Package(
             ])]
         ),
         .target(name: "Engine", dependencies: ["COrt"], path: "Sources/Engine"),
+        .target(name: "KeylimeCore", dependencies: ["Engine"], path: "Sources/KeylimeCore"),
         .executableTarget(
             name: "AutocorrectApp",
-            dependencies: ["Engine"],
+            dependencies: ["Engine", "KeylimeCore"],
             path: "Sources/AutocorrectApp",
             linkerSettings: [.linkedFramework("AppKit"), .linkedFramework("Carbon"), .linkedFramework("ApplicationServices")]
         ),
@@ -37,5 +38,6 @@ let package = Package(
             path: "Tests/EngineTests",
             resources: [.copy("Fixtures")]
         ),
+        .testTarget(name: "CoreTests", dependencies: ["KeylimeCore"], path: "Tests/CoreTests"),
     ]
 )

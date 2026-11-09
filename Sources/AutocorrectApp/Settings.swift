@@ -1,4 +1,5 @@
 import Foundation
+import KeylimeCore
 
 /// UserDefaults-backed settings (thread-safe reads via a cached snapshot).
 final class Settings {
@@ -20,14 +21,36 @@ final class Settings {
     private var excludedCache: [String]
 
     init() {
-        d.register(defaults: ["enabled": true, "holdMs": 200, "checkUpdates": true])
+        d.register(defaults: ["enabled": true, "holdMs": 200, "checkUpdates": true, "preview": false])
         if d.array(forKey: "excludedApps") == nil { d.set(Self.defaultExcluded, forKey: "excludedApps") }
         excludedCache = d.stringArray(forKey: "excludedApps") ?? Self.defaultExcluded
+        // 0.1.x had an on/off switch only
+        if d.string(forKey: "mode") == nil && d.object(forKey: "enabled") != nil && !d.bool(forKey: "enabled") {
+            d.set(CorrectionMode.off.rawValue, forKey: "mode")
+        }
+        modeCache = CorrectionMode(rawValue: d.string(forKey: "mode") ?? "") ?? .auto
     }
 
-    var enabled: Bool {
-        get { d.bool(forKey: "enabled") }
-        set { d.set(newValue, forKey: "enabled") }
+    private var modeCache: CorrectionMode
+
+    /// auto (confident fixes applied, the rest underlined) / suggest only / off
+    var mode: CorrectionMode {
+        get { lock.lock(); defer { lock.unlock() }; return modeCache }
+        set { lock.lock(); modeCache = newValue; lock.unlock(); d.set(newValue.rawValue, forKey: "mode") }
+    }
+
+    var enabled: Bool { mode != .off }
+
+    /// a bubble with the correction the current word is about to get (Space accepts, Esc cancels)
+    var preview: Bool {
+        get { d.bool(forKey: "preview") }
+        set { d.set(newValue, forKey: "preview") }
+    }
+
+    /// the "turn off macOS autocorrect" question was shown once
+    var askedSystemAutocorrect: Bool {
+        get { d.bool(forKey: "askedSystemAutocorrect") }
+        set { d.set(newValue, forKey: "askedSystemAutocorrect") }
     }
 
     /// model id; nil = the manifest default
@@ -39,7 +62,15 @@ final class Settings {
     /// how long a separator may wait for its correction before it goes out uncorrected
     var holdMs: Int { max(30, min(1000, d.integer(forKey: "holdMs"))) }
 
-    var checkUpdates: Bool { d.bool(forKey: "checkUpdates") }
+    var checkUpdates: Bool {
+        get { d.bool(forKey: "checkUpdates") }
+        set { d.set(newValue, forKey: "checkUpdates") }
+    }
+
+    var lastUpdateCheck: Date? {
+        get { d.object(forKey: "lastUpdateCheck") as? Date }
+        set { d.set(newValue, forKey: "lastUpdateCheck") }
+    }
 
     var excluded: [String] {
         lock.lock(); defer { lock.unlock() }
@@ -67,6 +98,7 @@ final class Settings {
         setExcluded(v)
     }
 
+    /// the 0.1.x folder name: kept so the personal dictionary carries over
     static var supportDir: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let u = base.appendingPathComponent("Autocorrect", isDirectory: true)

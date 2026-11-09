@@ -1,5 +1,6 @@
 import Engine
 import Foundation
+import KeylimeCore
 import os
 
 /// The decoder and its model session. Everything engine-side runs on one serial queue (never the event-tap thread);
@@ -86,19 +87,52 @@ final class EngineHost {
     }
 
     /// Correct one word end (engine queue). The precheck runs first on the engine queue (focused field checks via AX).
-    func correct(_ job: CorrectionJob, precheck: @escaping () -> Bool, done: @escaping (WordResult?) -> Void) {
+    func correct(_ job: CorrectionJob, precheck: @escaping () -> Bool, done: @escaping (WordResult?, Bool) -> Void) {
         queue.async {
-            guard let c = self.corrector, let sc = self.scorer, precheck() else { done(nil); return }
-            do {
-                sc.lastCtxTokens = 0
-                let r = try c.correctWord(job.input, scorer: sc, params: self.params, prev: job.prev, merge: job.merge)
-                self.stateLock.lock(); self._lastMs = r.ms; self.stateLock.unlock()
-                done(r)
-            } catch {
-                self.log.error("correction failed: \(String(describing: error))")
-                done(nil)
-            }
+            guard precheck() else { done(nil, false); return }
+            self.correctOnQueue(job.input, job.prev, job.merge, done)
         }
+    }
+
+    /// One finished word (AX path). done(result, typed word is in the lexicon), on the engine queue.
+    func correctWord(_ input: WordInput, prev: PrevWord?, merge: MergeInput?, done: @escaping (WordResult?, Bool) -> Void) {
+        queue.async { self.correctOnQueue(input, prev, merge, done) }
+    }
+
+    private func correctOnQueue(_ input: WordInput, _ prev: PrevWord?, _ merge: MergeInput?, _ done: (WordResult?, Bool) -> Void) {
+        guard let c = corrector, let sc = scorer else { done(nil, false); return }
+        do {
+            sc.lastCtxTokens = 0
+            let r = try c.correctWord(input, scorer: sc, params: params, prev: prev, merge: merge)
+            stateLock.lock(); _lastMs = r.ms; stateLock.unlock()
+            done(r, c.lex.index[input.typed.lowercased()] != nil)
+        } catch {
+            log.error("correction failed: \(String(describing: error))")
+            done(nil, false)
+        }
+    }
+
+    /// The idle pass: sentence checks, nearest first. done(fixes per request with "is a spelling fix", nil = cancelled /
+    /// no model), on the engine queue.
+    func checkSentences(_ reqs: [SentenceReq], cancelled: @escaping () -> Bool, done: @escaping ([[(SentenceFix, Bool)]]?) -> Void) {
+        queue.async {
+            guard let c = self.corrector, let sc = self.scorer else { done(nil); return }
+            var out: [[(SentenceFix, Bool)]] = []
+            for r in reqs {
+                if cancelled() { done(nil); return }
+                guard let fx = try? SentenceCheck.check(c, r, scorer: sc, params: self.params, minGap: Policy.FLAG_MARGIN, cancelled: cancelled) else {
+                    done(nil); return
+                }
+                out.append(fx.map { ($0, Policy.isSpellingEdit($0.from, $0.to, typedOOV: c.lex.index[$0.from.lowercased()] == nil)) })
+            }
+            if cancelled() { done(nil); return }
+            done(out)
+        }
+    }
+
+    /// engine queue: the typed word is a lexicon word
+    func inLexicon(_ w: String, done: @escaping (Bool) -> Void) {
+        queue.async { done(self.inLexiconOnQueue(w)) }
     }
 
     /// Layout change: letter centres for the spatial model (engine queue).

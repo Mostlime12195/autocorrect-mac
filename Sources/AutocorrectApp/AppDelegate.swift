@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import Engine
+import KeylimeCore
 import SwiftUI
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
@@ -8,6 +9,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let menu = NSMenu()
     private var engine: EngineHost!
     private var input: InputController!
+    private var layer: TextLayer!
+    private var overlay: Overlay!
+    private var settingsWindow: NSWindow?
+    private let settingsModel = SettingsModel()
     private let store = ModelStore()
     private let settings = Settings.shared
     private var user: UserData!
@@ -30,6 +35,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             engine.setStatus("lexicon.tsv missing from the app bundle", ready: false)
         }
         input = InputController(engine: engine)
+        overlay = Overlay()
+        layer = TextLayer(engine: engine, input: input, overlay: overlay)
+        input.layer = layer
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) {
+            [weak self] n in
+            if let a = n.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication { self?.layer.appActivated(a) }
+        }
+        settingsModel.onChange = { [weak self] in self?.refreshIcon() }
+        settingsModel.openLists = { [weak self] in self?.openLists() }
+        Updater.shared.onChange = { [weak self] in self?.refreshIcon() }
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         menu.delegate = self
@@ -37,14 +52,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshIcon()
 
         if AXIsProcessTrusted() && input.start() {
-            // ok
+            // first run of this version with access already on: offer to turn off macOS autocorrect once
+            if !settings.askedSystemAutocorrect && SystemAutocorrect.isOn { settings.askedSystemAutocorrect = true; openSettings() }
         } else {
+            settings.askedSystemAutocorrect = true   // the permission window has the switch
             showPermission()
         }
         Task { await prepareModel() }
-        if settings.checkUpdates {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 15) { Task { await Updater.check(userInitiated: false) } }
-        }
+        Updater.shared.startAutomaticChecks()
     }
 
     // MARK: model
@@ -90,7 +105,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if permissionWindow == nil {
             let v = PermissionView(model: permissionModel, openSettings: { [weak self] in self?.openAccessibilitySettings() },
                                    relaunch: { [weak self] in self?.relaunch() })
-            permissionWindow = makeWindow("Autocorrect", v)
+            permissionWindow = makeWindow("Keylime", v)
         }
         NSApp.activate(ignoringOtherApps: true)
         permissionWindow?.makeKeyAndOrderFront(nil)
@@ -129,14 +144,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let b = statusItem?.button else { return }
         let on = settings.enabled && input?.tapRunning == true && engine?.ready == true
         let name = on ? "text.badge.checkmark" : "text.badge.xmark"
-        if let img = NSImage(systemSymbolName: name, accessibilityDescription: "Autocorrect") {
+        if let img = NSImage(systemSymbolName: name, accessibilityDescription: "Keylime") {
             img.isTemplate = true
             b.image = img
             b.title = ""
         } else {
-            b.title = on ? "ac" : "ac·"
+            b.title = on ? "kl" : "kl·"
         }
         b.appearsDisabled = !on
+        b.toolTip = on ? "Keylime: " + modeTitle(settings.mode) : "Keylime: off"
+
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
@@ -153,10 +170,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if engine.ready && engine.lastMs > 0 { menu.addItem(disabled(String(format: "Last word: %.0f ms · keyboard: %@", engine.lastMs, input.layoutName))) }
         menu.addItem(.separator())
 
-        let on = NSMenuItem(title: "Autocorrect", action: #selector(toggleEnabled), keyEquivalent: "")
-        on.state = settings.enabled ? .on : .off
-        on.target = self
-        menu.addItem(on)
+        if let l = Updater.shared.available {
+            menu.addItem(item(Updater.shared.installing ? "Installing Keylime \(l.version)…" : "Install Keylime \(l.version) & Relaunch", #selector(installUpdate)))
+            menu.addItem(.separator())
+        }
+
+        for m in CorrectionMode.allCases {
+            let it = NSMenuItem(title: modeTitle(m), action: #selector(pickMode(_:)), keyEquivalent: "")
+            it.state = settings.mode == m ? .on : .off
+            it.representedObject = m.rawValue
+            it.target = self
+            menu.addItem(it)
+        }
+        menu.addItem(.separator())
 
         if let bid = input.frontmostBundleId, bid != Bundle.main.bundleIdentifier {
             let name = NSRunningApplication.runningApplications(withBundleIdentifier: bid).first?.localizedName ?? bid
@@ -189,13 +215,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         modelItem.submenu = sub
         menu.addItem(modelItem)
 
+        menu.addItem(item("Settings…", #selector(openSettings), ","))
         menu.addItem(item("Personal Dictionary & Excluded Apps…", #selector(openLists)))
         if !input.tapRunning { menu.addItem(item("Grant Accessibility Permission…", #selector(openPermission))) }
         menu.addItem(.separator())
         menu.addItem(item("Check for Updates…", #selector(checkUpdates)))
         menu.addItem(item("Copy Debug Log", #selector(copyDebugLog)))
         menu.addItem(disabled("Version \(Updater.currentVersion)"))
-        menu.addItem(item("Quit Autocorrect", #selector(quit), "q"))
+        menu.addItem(item("Quit Keylime", #selector(quit), "q"))
     }
 
     private func item(_ title: String, _ sel: Selector, _ key: String = "") -> NSMenuItem {
@@ -215,7 +242,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSPasteboard.general.setString(input.debugLog, forType: .string)
     }
 
-    @objc private func toggleEnabled() { settings.enabled.toggle(); refreshIcon() }
+    private func modeTitle(_ m: CorrectionMode) -> String {
+        switch m {
+        case .auto: return "Fix Confident Typos, Underline the Rest"
+        case .suggest: return "Suggest Only"
+        case .off: return "Off"
+        }
+    }
+
+    @objc private func pickMode(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let m = CorrectionMode(rawValue: raw) else { return }
+        settings.mode = m
+        settingsModel.reload()
+        refreshIcon()
+    }
+
+    @objc private func openSettings() {
+        if settingsWindow == nil { settingsWindow = makeWindow("Keylime Settings", SettingsView(model: settingsModel)) }
+        settingsModel.reload()
+        NSApp.activate(ignoringOtherApps: true)
+        settingsWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func installUpdate() {
+        guard let l = Updater.shared.available else { return }
+        Task { await Updater.shared.install(l) }
+    }
 
     @objc private func togglePauseApp(_ sender: NSMenuItem) {
         guard let bid = sender.representedObject as? String else { return }
@@ -234,7 +286,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if listsWindow == nil {
             let m = ListsModel(user: user)
             listsModel = m
-            listsWindow = makeWindow("Autocorrect", ListsView(model: m))
+            listsWindow = makeWindow("Keylime Dictionary", ListsView(model: m))
         }
         listsModel?.reload()
         NSApp.activate(ignoringOtherApps: true)
@@ -243,7 +295,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func openPermission() { showPermission() }
 
-    @objc private func checkUpdates() { Task { await Updater.check(userInitiated: true) } }
+    @objc private func checkUpdates() { Task { await Updater.shared.check(userInitiated: true) } }
 
     @objc private func quit() { NSApp.terminate(nil) }
 }

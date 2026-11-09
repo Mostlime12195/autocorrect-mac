@@ -2,17 +2,34 @@ import AppKit
 import ApplicationServices
 import Carbon
 import Engine
+import KeylimeCore
 import os
 
-/// The event tap and the hold / inject machinery around TypingCore.
+/// What the event tap tells the text layer (in key order).
+enum KeySignal {
+    /// a word character was typed
+    case char
+    /// a separator ended this word
+    case boundary(word: String, sep: String)
+    case backspace
+    /// any other text (digits after punctuation, symbols, ...)
+    case other
+    /// the caret may be anywhere now: click, arrows, shortcuts
+    case reset
+}
+
+/// The event tap. It never does Accessibility work or waits on inference: it passes keys through and signals the text
+/// layer, which reads and writes the field through Accessibility on its own queue.
 ///
-/// Ordering rule: the order in which events leave this tap is the order the app sees them. While a correction is
-/// pending (the separator is held) or our synthesized edit is in flight, every real key / click is swallowed and
-/// queued; queued events are replayed (as tagged copies) after the edit, and the edit only counts as done when its last
-/// tagged event has come back through this tap. So keys are never lost or reordered, and the tap thread never waits on
-/// inference: a correction that isn't back within holdMs is dropped and the separator goes out as typed.
+/// Two places still hold keys back, so their order is kept:
+///  - while the text layer writes a correction (`gate`): keys typed meanwhile are queued and replayed right after;
+///  - the keystroke fallback, for fields whose text Accessibility can't read or write: the separator is held while the
+///    word is corrected, the edit is typed as backspaces + keys, queued keys are replayed (the 0.1 behaviour).
+/// Queued events are replayed as tagged copies; a batch counts as done when its last tagged event comes back through
+/// the tap (or a watchdog fires).
 final class InputController {
-    private enum State { case idle, holding(Int), injecting(Int64) }
+    enum FieldMode { case unknown, ax, keys }
+    private enum State { case idle, holding(Int), injecting(Int64), gated }
 
     private let engine: EngineHost
     private let settings = Settings.shared
@@ -23,15 +40,20 @@ final class InputController {
     private var queue: [CGEvent] = []
     private var held: (job: CorrectionJob, sep: CGEvent, app: String?)?
     private var seq: Int64 = 0
-    private let injectQ = DispatchQueue(label: "ac.inject", qos: .userInteractive)
+    private let injectQ = DispatchQueue(label: "kl.inject", qos: .userInteractive)
     private let source = CGEventSource(stateID: .privateState)
     private var tap: CFMachPort?
     /// keys whose keyDown is queued, held or in flight: only their keyUps wait. Every other keyUp goes out at once,
     /// or the app sees the key as still down (press-and-hold accent menu, key repeat).
     private var heldDowns = Set<Int64>()
+    /// a click the text layer took (revert pill): its mouseUp is swallowed too
+    private var swallowMouseUp = false
+    private var fieldMode = FieldMode.unknown
     /// recent decisions for "Copy Debug Log" (memory only)
     private var debug: [String] = []
     private let t0 = Date()
+
+    weak var layer: TextLayer?
 
     // cached environment (updated from the main thread)
     private var frontApp: String?
@@ -60,6 +82,7 @@ final class InputController {
 
     var frontmostBundleId: String? { lock.lock(); defer { lock.unlock() }; return frontApp }
     var layoutName: String { lock.lock(); defer { lock.unlock() }; return layout.name }
+    var isInputMethod: Bool { lock.lock(); defer { lock.unlock() }; return layout.isInputMethod }
 
     private func appChanged(_ app: String?) {
         lock.lock()
@@ -74,6 +97,17 @@ final class InputController {
         engine.setLayout(l.centers)
     }
 
+    /// text layer: how the focused field is edited
+    func setFieldMode(_ m: FieldMode) {
+        lock.lock()
+        if m != fieldMode {
+            note("field mode \(m)")
+            fieldMode = m
+            if case .idle = state { core.reset() }
+        }
+        lock.unlock()
+    }
+
     // MARK: tap
 
     /// Start the tap on its own thread. false when it can't be created (no Accessibility permission yet).
@@ -81,7 +115,7 @@ final class InputController {
     func start() -> Bool {
         if tapRunning { return true }
         let mask: CGEventMask = [CGEventType.keyDown, .keyUp, .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp,
-                                 .otherMouseDown, .otherMouseUp].reduce(0) { $0 | (1 << CGEventMask($1.rawValue)) }
+                                 .otherMouseDown, .otherMouseUp, .scrollWheel].reduce(0) { $0 | (1 << CGEventMask($1.rawValue)) }
         let me = Unmanaged.passUnretained(self).toOpaque()
         guard let t = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap, eventsOfInterest: mask,
                                         callback: { _, type, event, refcon in
@@ -96,7 +130,7 @@ final class InputController {
             CGEvent.tapEnable(tap: t, enable: true)
             CFRunLoopRun()
         }
-        th.name = "ac-tap"
+        th.name = "kl-tap"
         th.qualityOfService = .userInteractive
         th.start()
         log.info("event tap started")
@@ -106,6 +140,10 @@ final class InputController {
     private func handle(_ type: CGEventType, _ event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             if let t = tap { CGEvent.tapEnable(tap: t, enable: true) }
+            return Unmanaged.passUnretained(event)
+        }
+        if type == .scrollWheel {
+            layer?.scrolled()
             return Unmanaged.passUnretained(event)
         }
         let tag = event.getIntegerValueField(.eventSourceUserData)
@@ -119,12 +157,22 @@ final class InputController {
         }
         lock.lock()
         defer { lock.unlock() }
+        if type == .leftMouseUp && swallowMouseUp { swallowMouseUp = false; return nil }
         if case .idle = state {} else {
             let code = event.getIntegerValueField(.keyboardEventKeycode)
             if type == .keyUp && !heldDowns.contains(code) { return Unmanaged.passUnretained(event) }
             if type == .keyDown { heldDowns.insert(code) }
             if let c = event.copy() { queue.append(c) }
             return nil
+        }
+        // the text layer's own targets: the revert pill, the preview bubble's Esc, backspace right after a correction
+        if let l = layer {
+            if type == .leftMouseDown && l.interceptClick(event.location) { swallowMouseUp = true; return nil }
+            if type == .keyDown && event.flags.intersection([.maskCommand, .maskControl, .maskAlternate]).isEmpty {
+                let code = Int(event.getIntegerValueField(.keyboardEventKeycode))
+                if code == kVK_Escape && l.interceptEscape() { return nil }
+                if code == kVK_Delete && fieldMode != .keys && l.interceptBackspace() { core.reset(); return nil }
+            }
         }
         switch process(type, event) {
         case .pass:
@@ -144,10 +192,12 @@ final class InputController {
         }
     }
 
-    /// lock held
+    /// lock held: one real event, in order (live or replayed). Signals the text layer; in the keystroke fallback,
+    /// TypingCore decides holds and undos.
     private func process(_ type: CGEventType, _ e: CGEvent) -> KeyDecision {
         switch type {
         case .leftMouseDown, .rightMouseDown, .otherMouseDown:
+            layer?.signal(.reset, click: e.location)
             return core.key(.reset, canCorrect: false)
         case .keyDown:
             break
@@ -156,34 +206,84 @@ final class InputController {
         }
         let flags = e.flags
         let code = CGKeyCode(e.getIntegerValueField(.keyboardEventKeycode))
-        if flags.contains(.maskCommand) || flags.contains(.maskControl) { return core.key(.reset, canCorrect: false) }
+        if flags.contains(.maskCommand) || flags.contains(.maskControl) { return reset() }
         switch Int(code) {
         case kVK_Delete:
+            layer?.signal(.backspace)
             return core.key(.backspace, canCorrect: false)
         case kVK_LeftArrow, kVK_RightArrow, kVK_UpArrow, kVK_DownArrow, kVK_Home, kVK_End, kVK_PageUp, kVK_PageDown,
              kVK_ForwardDelete, kVK_Escape, kVK_Tab, kVK_Help:
-            return core.key(.reset, canCorrect: false)
+            return reset()
         case kVK_Return, kVK_ANSI_KeypadEnter:
-            return core.key(.text("\n"), canCorrect: canCorrect())
+            return text("\n")
         default:
             break
         }
         var len = 0
         var buf = [UniChar](repeating: 0, count: 8)
         e.keyboardGetUnicodeString(maxStringLength: 8, actualStringLength: &len, unicodeString: &buf)
-        if len == 0 { return core.key(.reset, canCorrect: false) }   // dead key: an accent is being composed
+        if len == 0 { return reset() }   // dead key: an accent is being composed
         let s = String(utf16CodeUnits: buf, count: len)
         // control characters and function keys (U+F700 private range): not text
         if s.unicodeScalars.contains(where: { ($0.value < 32 && $0 != "\r" && $0 != "\n") || (0xF700...0xF8FF).contains($0.value) }) {
-            return core.key(.reset, canCorrect: false)
+            return reset()
         }
-        return core.key(.text(s), canCorrect: canCorrect())
+        return text(s)
+    }
+
+    /// lock held
+    private func reset() -> KeyDecision {
+        layer?.signal(.reset)
+        return core.key(.reset, canCorrect: false)
+    }
+
+    /// lock held
+    private func text(_ s0: String) -> KeyDecision {
+        let s = s0 == "\r" ? "\n" : s0
+        let keys = fieldMode == .keys
+        let word = core.word
+        let d = core.key(.text(s), canCorrect: keys && canCorrect())
+        if let c = s.first, s.count == 1, TypingCore.isWordChar(c) {
+            layer?.signal(.char)
+        } else if let c = s.first, s.count == 1, TypingCore.SEPARATORS.contains(c), !word.isEmpty {
+            layer?.signal(.boundary(word: word, sep: s))
+        } else {
+            layer?.signal(.other)
+        }
+        return d
     }
 
     /// lock held
     private func canCorrect() -> Bool {
-        settings.enabled && engine.ready && !layout.isInputMethod && !settings.isExcluded(frontApp) && !IsSecureEventInputEnabled()
+        settings.mode == .auto && engine.ready && !layout.isInputMethod && !settings.isExcluded(frontApp) && !IsSecureEventInputEnabled()
     }
+
+    // MARK: gate (AX writes)
+
+    /// Text layer queue: run an AX write with real keys held back, then replay them in order. Waits (briefly) for a
+    /// keystroke-fallback edit in flight to finish first.
+    func gate(_ body: () -> Void) {
+        for _ in 0..<150 {
+            lock.lock()
+            if case .idle = state { state = .gated; lock.unlock(); break }
+            lock.unlock()
+            usleep(2000)
+        }
+        body()
+        lock.lock()
+        guard case .gated = state else { lock.unlock(); return }
+        drainAndPost()
+    }
+
+    /// Text layer: type a backspace (a swallowed one whose AX undo didn't work)
+    func postBackspace() {
+        lock.lock()
+        let evs = key(CGKeyCode(kVK_Delete), nil)
+        lock.unlock()
+        for e in evs { e.post(tap: .cghidEventTap) }
+    }
+
+    // MARK: keystroke fallback
 
     /// lock held: the separator `sep` is swallowed until the correction resolves or times out
     private func beginHold(_ job: CorrectionJob, _ sep: CGEvent) {
@@ -193,26 +293,32 @@ final class InputController {
         held = (job, copy, frontApp)
         state = .holding(job.id)
         let id = job.id
-        engine.correct(job, precheck: { Self.focusedFieldOK() }) { [weak self] r in
-            self?.injectQ.async { self?.resolve(id, r) }
+        engine.correct(job, precheck: { Self.focusedFieldOK() }) { [weak self] r, inLex in
+            self?.injectQ.async { self?.resolve(id, r, inLex) }
         }
-        injectQ.asyncAfter(deadline: .now() + .milliseconds(settings.holdMs)) { [weak self] in self?.resolve(id, nil) }
+        injectQ.asyncAfter(deadline: .now() + .milliseconds(settings.holdMs)) { [weak self] in self?.resolve(id, nil, false) }
     }
 
     /// injectQ: the held word end resolved (r == nil: too slow, skipped or failed)
-    private func resolve(_ id: Int, _ r: WordResult?) {
+    private func resolve(_ id: Int, _ r: WordResult?, _ inLex: Bool) {
         lock.lock()
         guard case .holding(let hid) = state, hid == id, let h = held else { lock.unlock(); return }
         held = nil
         // the user switched apps meanwhile: never type into another app
-        let r2 = h.app == frontApp ? r : nil
+        var r2 = h.app == frontApp ? r : nil
+        // only confident corrections are typed (no underlines without Accessibility)
+        if let rr = r2 {
+            let o = WordOutcome(rr, typedOOV: !inLex)
+            if case .apply = Policy.boundary(o, mode: settings.mode, hasPrev: h.job.prev != nil, prevOut: nil, userWord: false,
+                                             penalty: { [engine] a, b in engine.user.penalty(a, b) }) {} else { r2 = nil }
+        }
         var evs: [CGEvent] = []
         let inj = core.resolve(h.job, r2)
         if let inj = inj {
             evs = synth(inj)
             corrections += 1
         }
-        note("resolve \(id) " + (r == nil ? "timeout/skip" : r2 == nil ? "app changed" : "out=\"\(r!.out)\"")
+        note("resolve \(id) " + (r == nil ? "timeout/skip" : r2 == nil ? "kept" : "out=\"\(r!.out)\"")
              + (inj.map { " del=\($0.deletes) ins=\($0.text.debugDescription)" } ?? " no edit") + " queued=\(queue.count)")
         evs.append(fresh(h.sep))
         state = .injecting(tagAll(evs))
@@ -224,6 +330,12 @@ final class InputController {
     private func echoed(_ s: Int64) {
         lock.lock()
         guard case .injecting(let a) = state, a == s else { lock.unlock(); return }
+        drainAndPost()
+    }
+
+    /// lock held on entry, released on exit: replay queued events in order until the queue is empty or one of them
+    /// starts a hold / undo
+    private func drainAndPost() {
         var out: [CGEvent] = []
         var startJob: CorrectionJob? = nil
         var startSep: CGEvent? = nil
@@ -303,7 +415,7 @@ final class InputController {
         return out
     }
 
-    /// injectQ: post in order; the watchdog finishes the batch if its echo never comes back (tap disabled, ...)
+    /// post in order; the watchdog finishes the batch if its echo never comes back (tap disabled, ...)
     private func post(_ evs: [CGEvent]) {
         // paced: Chromium/Electron apps (Discord, Slack, Chrome) reorder edits posted back to back
         var prevDelete = false
@@ -328,16 +440,20 @@ final class InputController {
         if debug.count > 300 { debug.removeFirst(debug.count - 300) }
     }
 
+    /// any thread
+    func debugNote(_ s: String) { lock.lock(); note(s); lock.unlock() }
+
     var debugLog: String {
         lock.lock(); defer { lock.unlock() }
-        return "Autocorrect \(Updater.currentVersion), keyboard \(layout.name), holdMs \(settings.holdMs)\n" + debug.joined(separator: "\n")
+        return "Keylime \(Updater.currentVersion), keyboard \(layout.name), mode \(settings.mode.rawValue), field \(fieldMode), holdMs \(settings.holdMs)\n"
+            + debug.joined(separator: "\n")
     }
 
     // MARK: learning
 
     /// An undone correction: a spelling fix of a word the lexicon doesn't know -> personal dictionary ("not a typo");
     /// anything else (real-word swaps, capitals, merges) -> that edit is suppressed for a week.
-    private func learn(_ u: Undone) {
+    func learn(_ u: Undone) {
         let typed = u.typed, out = u.out
         guard typed != out else { return }
         engine.queue.async { [engine] in
@@ -351,22 +467,9 @@ final class InputController {
 
     /// engine queue: skip password fields and fields with a selection (inline autocomplete in address bars)
     static func focusedFieldOK() -> Bool {
-        let sys = AXUIElementCreateSystemWide()
-        AXUIElementSetMessagingTimeout(sys, 0.05)
-        var f: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(sys, kAXFocusedUIElementAttribute as CFString, &f) == .success, let fv = f,
-              CFGetTypeID(fv) == AXUIElementGetTypeID() else { return true }
-        let el = fv as! AXUIElement
-        AXUIElementSetMessagingTimeout(el, 0.05)
-        var sub: CFTypeRef?
-        if AXUIElementCopyAttributeValue(el, kAXSubroleAttribute as CFString, &sub) == .success, let s = sub as? String,
-           s == (kAXSecureTextFieldSubrole as String) { return false }
-        var rng: CFTypeRef?
-        if AXUIElementCopyAttributeValue(el, kAXSelectedTextRangeAttribute as CFString, &rng) == .success, let rv = rng,
-           CFGetTypeID(rv) == AXValueGetTypeID() {
-            var r = CFRange()
-            if AXValueGetValue(rv as! AXValue, .cfRange, &r), r.length > 0 { return false }
-        }
+        guard let f = AXField.focused() else { return true }
+        if f.isSecure { return false }
+        if let r = f.selection, r.length > 0 { return false }
         return true
     }
 }

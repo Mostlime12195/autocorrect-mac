@@ -31,6 +31,7 @@ public struct Injection: Equatable {
 public struct Undone: Equatable {
     public let typed: String
     public let out: String
+    public init(typed: String, out: String) { self.typed = typed; self.out = out }
 }
 
 public enum KeyDecision {
@@ -68,12 +69,23 @@ public final class TypingCore {
 
     public static let CTX_CHARS = 400
     public static let MAX_WORD = 32
-    static let SEPARATORS: Set<Character> = [" ", "\n", ".", ",", "!", "?", ";", ":", ")", "\""]
+    public static let SEPARATORS: Set<Character> = [" ", "\n", ".", ",", "!", "?", ";", ":", ")", "\""]
     /// what may come right before a correctable word (no @handles, #tags, paths, mid-token words)
     static let OPENERS: Set<Character> = [" ", "\n", "\t", "(", "[", "{", "\"", "\u{201C}", "\u{2018}"]
     static let I_WORDS: Set<String> = ["i", "i'm", "i'll", "i'd", "i've"]
 
     public init() {}
+
+    /// may a correctable word start right after this character (nil = start of the text)?
+    public static func isOpener(_ c: Character?) -> Bool { c.map { OPENERS.contains($0) } ?? true }
+
+    /// standalone i / i'm / i'll / i'd / i've -> capitalized, unless the user undid that edit
+    public static func capIWords(_ text: String, penalty: (String, String) -> Double) -> String {
+        text.split(separator: " ", omittingEmptySubsequences: false).map { w -> String in
+            let s = String(w)
+            return I_WORDS.contains(s) && penalty(s, "I" + s.dropFirst()) == 0 ? "I" + s.dropFirst() : s
+        }.joined(separator: " ")
+    }
 
     public var isPending: Bool { pending != nil }
 
@@ -81,10 +93,10 @@ public final class TypingCore {
         word = ""; context = ""; keepTypedOnce = false; prev = nil; last = nil
     }
 
-    static func isWordChar(_ c: Character) -> Bool { c.isLetter || c.isNumber || c == "'" || c == "\u{2019}" }
+    public static func isWordChar(_ c: Character) -> Bool { c.isLetter || c.isNumber || c == "'" || c == "\u{2019}" }
 
     /// [A-Za-z]+(?:'[A-Za-z]+)*'?
-    static func correctable(_ w: String) -> Bool {
+    public static func correctable(_ w: String) -> Bool {
         let cs = Array(w)
         guard let f = cs.first, isLowerASCII(f) || isUpperASCII(f), cs.count <= MAX_WORD else { return false }
         var prevApos = false
@@ -97,7 +109,7 @@ public final class TypingCore {
     }
 
     /// -> (text up to the end of the last word, separator after it)
-    static func splitLeft(_ before: String) -> (String, String) {
+    public static func splitLeft(_ before: String) -> (String, String) {
         guard let r = segRanges(before).last else { return ("", before) }
         let cs = Array(before)
         return (String(cs[0..<r.1]), String(cs[r.1...]))
@@ -173,10 +185,7 @@ public final class TypingCore {
 
     private func capIWords(_ text: String) -> String {
         guard capI else { return text }
-        return text.split(separator: " ", omittingEmptySubsequences: false).map { w -> String in
-            let s = String(w)
-            return Self.I_WORDS.contains(s) && penalty(s, "I" + s.dropFirst()) == 0 ? "I" + s.dropFirst() : s
-        }.joined(separator: " ")
+        return Self.capIWords(text, penalty: penalty)
     }
 
     /// The held word end resolved: the correction result, or nil (too slow / skipped / failed).

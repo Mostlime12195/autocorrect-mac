@@ -1,12 +1,14 @@
 import AppKit
 import ApplicationServices
 import Engine
+import KeylimeCore
 import SwiftUI
 
 // MARK: onboarding (Accessibility permission)
 
 final class PermissionModel: ObservableObject {
     @Published var trusted = AXIsProcessTrusted()
+    @Published var systemAutocorrect = SystemAutocorrect.isOn
 }
 
 struct PermissionView: View {
@@ -16,15 +18,18 @@ struct PermissionView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Autocorrect needs Accessibility access").font(.title2).bold()
-            Text("It watches what you type and fixes typos when you finish a word, using a small language model that runs on this Mac. Nothing you type leaves your computer.")
+            Text("Keylime needs Accessibility access").font(.title2).bold()
+            Text("It reads the text field you're typing in, fixes typos it's sure about and underlines the rest, using a small language model that runs on this Mac. Nothing you type leaves your computer.")
                 .fixedSize(horizontal: false, vertical: true)
             VStack(alignment: .leading, spacing: 6) {
                 Text("1. Click **Open System Settings**.")
-                Text("2. Turn on **Autocorrect** under Privacy & Security → Accessibility (add it with + if it isn't listed).")
+                Text("2. Turn on **Keylime** under Privacy & Security → Accessibility (add it with + if it isn't listed). If an old **Autocorrect** entry is there, remove it.")
                 Text("3. Come back here. This window closes by itself once access is granted.")
             }
-            Text("Tip: turn off macOS's own \"Correct spelling automatically\" (System Settings → Keyboard → Text Input → Edit) so the two don't fight.")
+            Toggle("Turn off macOS's own autocorrect so the two don't fight", isOn: Binding(
+                get: { !model.systemAutocorrect },
+                set: { off in SystemAutocorrect.set(!off); model.systemAutocorrect = SystemAutocorrect.isOn }))
+            Text("Apps that are already open may need a restart to notice.")
                 .font(.footnote).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
             HStack {
                 Image(systemName: model.trusted ? "checkmark.circle.fill" : "hourglass")
@@ -37,6 +42,56 @@ struct PermissionView: View {
         }
         .padding(22)
         .frame(width: 500)
+    }
+}
+
+// MARK: settings
+
+final class SettingsModel: ObservableObject {
+    @Published var mode = Settings.shared.mode { didSet { Settings.shared.mode = mode; onChange?() } }
+    @Published var preview = Settings.shared.preview { didSet { Settings.shared.preview = preview } }
+    @Published var checkUpdates = Settings.shared.checkUpdates { didSet { Settings.shared.checkUpdates = checkUpdates } }
+    @Published var systemAutocorrect = SystemAutocorrect.isOn
+    var onChange: (() -> Void)?
+    var openLists: (() -> Void)?
+    func reload() {
+        if mode != Settings.shared.mode { mode = Settings.shared.mode }
+        systemAutocorrect = SystemAutocorrect.isOn
+    }
+}
+
+struct SettingsView: View {
+    @ObservedObject var model: SettingsModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Corrections").font(.headline)
+                Picker("", selection: $model.mode) {
+                    Text("Fix confident typos, underline the rest").tag(CorrectionMode.auto)
+                    Text("Suggest only (underline, never change text)").tag(CorrectionMode.suggest)
+                    Text("Off").tag(CorrectionMode.off)
+                }.pickerStyle(.radioGroup).labelsHidden()
+                Toggle("Preview a correction while typing (Space accepts, Esc cancels)", isOn: $model.preview)
+                    .disabled(model.mode != .auto)
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                Text("macOS autocorrect").font(.headline)
+                Text("“Correct spelling automatically” is \(model.systemAutocorrect ? "on" : "off").")
+                    .foregroundColor(.secondary)
+                Toggle("Turn off macOS's own autocorrect (recommended)", isOn: Binding(
+                    get: { !model.systemAutocorrect },
+                    set: { off in SystemAutocorrect.set(!off); model.systemAutocorrect = SystemAutocorrect.isOn }))
+                Text("Apps that are already open may need a restart to notice.").font(.footnote).foregroundColor(.secondary)
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Other").font(.headline)
+                Toggle("Check for updates automatically", isOn: $model.checkUpdates)
+                Button("Personal Dictionary & Excluded Apps…") { model.openLists?() }
+            }
+        }
+        .padding(20)
+        .frame(width: 440)
     }
 }
 

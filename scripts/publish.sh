@@ -12,7 +12,7 @@ PUB=Mostlime12195/autocorrect-models
 HOST=mostlime@hackclub.app
 DIR=/var/www/autocorrect-android
 BASE=https://autocorrect.mostlime.hackclub.app/autocorrect-android
-ZIP="Autocorrect-mac-$V.zip"
+ZIP="Keylime-mac-$V.zip"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -20,12 +20,12 @@ gh release download "$TAG" -R "$REPO" -p "$ZIP" -D "$TMP"
 F="$TMP/$ZIP"
 SHA=$(sha256sum "$F" | cut -d' ' -f1)
 SIZE=$(stat -c %s "$F")
-NOTES="${NOTES:-Autocorrect for Mac $V (Apple Silicon, macOS 13+). Ad-hoc signed, not notarized: first launch with right-click > Open, or xattr -dr com.apple.quarantine /Applications/Autocorrect.app}"
+NOTES="${NOTES:-Keylime for Mac $V (Apple Silicon, macOS 13+). Self-signed, not notarized: first launch with right-click > Open, or xattr -dr com.apple.quarantine /Applications/Keylime.app}"
 
 if gh release view "$TAG" -R "$PUB" >/dev/null 2>&1; then
   gh release upload "$TAG" "$F" -R "$PUB" --clobber
 else
-  gh release create "$TAG" "$F" -R "$PUB" --latest=false --title "Autocorrect for Mac $V" --notes "$NOTES"
+  gh release create "$TAG" "$F" -R "$PUB" --latest=false --title "Keylime for Mac $V" --notes "$NOTES"
 fi
 URL="https://github.com/$PUB/releases/download/$TAG/$ZIP"
 # wait for propagation, then probe ONLY cache-busted URLs (a plain probe too early caches 404s on the CDN)
