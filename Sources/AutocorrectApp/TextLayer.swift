@@ -51,6 +51,7 @@ final class TextLayer {
     private var dWrite = "none yet"
     private var dDrawn = "nothing"
     private var dMarks = 0
+    private var dFocus = "no queries yet"
     private let log = Logger(subsystem: "dev.mostlime.autocorrect-mac", category: "text")
 
     // MARK: text queue only
@@ -233,17 +234,39 @@ final class TextLayer {
     // MARK: field
 
     /// look at the focused element again (force: even if we looked very recently)
+    /// Look at the focused element again (force: even if we looked very recently). A failed focus query keeps the
+    /// field we have while it still answers (Electron flaps between the field and "no value"); see FocusTracker.
     private func probe(force: Bool) {
         if !force && Date().timeIntervalSince(lastProbe) < 1 { return }
         lastProbe = Date()
-        lock.lock(); let front = frontPid; lock.unlock()
-        let (f, why) = AXField.focused(app: front)
+        lock.lock(); let front = frontPid; let bid = dApp; lock.unlock()
+        var (f, why) = AXField.focused(app: front)
+        if f == nil && field == nil && Date().timeIntervalSince(lastDiscover) > 2 {
+            lastDiscover = Date()
+            if let d = AXField.discover(app: front, bundleId: bid) { f = d; log.notice("focus discovery found the field") }
+        }
         if f?.pid == ProcessInfo.processInfo.processIdentifier { ownWindow(); return }
         if f == nil { lastFocusWhy = why }
-        if let f = f, f.same(field) { updateMode(f); return }
-        switchField(f)
+        let d = focus.observe(f?.el, now: Date().timeIntervalSince1970, alive: { AXField($0).liveness() })
+        switch d {
+        case .same: if let cur = field { updateMode(cur) } else { switchField(f) }
+        case .changed: switchField(f)
+        case .holding:
+            if let cur = field { updateMode(cur) }
+            if focus.failuresInRow == 1 { log.info("focus query failed (\(why, privacy: .public)); keeping the field") }
+        case .lost, .none:
+            if field != nil { log.notice("field lost: \(why, privacy: .public)") }
+            switchField(nil)
+        }
+        let age = focus.lastGood.map { String(format: "%.1f s ago", Date().timeIntervalSince1970 - $0) } ?? "never"
+        lock.lock()
+        dFocus = "\(focus.failuresInRow) failed in a row, \(focus.failures) in total; last good \(age); last: \(d)" +
+            (f == nil ? " (\(why))" : "")
+        lock.unlock()
     }
     private var lastFocusWhy = ""
+    private lazy var focus = FocusTracker<AXUIElement>(grace: 3, same: { CFEqual($0, $1) })
+    private var lastDiscover = Date.distantPast
 
     /// typing in Keylime's own windows: nothing happens there (and the diagnostics keep the last app)
     private func ownWindow() {
@@ -285,6 +308,7 @@ final class TextLayer {
     }
 
     private func switchField(_ f: AXField?) {
+        if f == nil { focus.reset() }
         if field == nil && f == nil { updateMode(nil); return }
         lock.lock(); dMarks = 0; lock.unlock()
         tracker.removeAll(); pills.removeAll(); recents.removeAll(); prev = nil; keepOnce = nil
@@ -368,15 +392,17 @@ final class TextLayer {
         guard var snap = f.snapshot(), snap.selLength == 0 else { prev = nil; noteWord("skipped: field text unreadable or a selection"); return }
         var found = locate(word, snap)
         // Chromium / Electron update their accessibility text a little after the key
-        for _ in 0..<3 where found == nil {
-            usleep(30_000)
+        for _ in 0..<5 where found == nil {
+            usleep(40_000)
             guard let s2 = f.snapshot(), s2.selLength == 0 else { break }
             snap = s2
             found = locate(word, s2)
         }
         guard let start = found else { prev = nil; noteWord("skipped: the word isn't in the field text before the caret"); return }
         if let k = keepOnce, k.start == start, k.word == word { keepOnce = nil; prev = nil; return }
-        guard start == 0 || TypingCore.isOpener(charBefore(snap, start)) else { prev = nil; return }
+        guard start == 0 || TypingCore.isOpener(charBefore(snap, start)) else {
+            prev = nil; noteWord("skipped: the word follows \(charBefore(snap, start).map { "U+" + String($0.unicodeScalars.first!.value, radix: 16, uppercase: true) } ?? "?"), not a space"); return
+        }
         let (left, sp) = TypingCore.splitLeft(textBefore(snap, start, Self.CTX_CHARS))
         let input = WordInput(typed: word, left: left, sep: sp)
         var pw: PrevWord? = nil
@@ -738,6 +764,7 @@ final class TextLayer {
             "Frontmost app: \(dApp)\(excluded ? " (excluded/paused)" : "")",
             "Focused element: \(dRole)",
             "Path: \(dPath) (\(dWhy))",
+            "Focus queries: \(dFocus)",
             "Last word end: \(dWord)",
             "Last pause check: \(dIdle)",
             "Last write: \(dWrite)",

@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import KeylimeCore
 import os
 
 /// The focused text element, read and written through Accessibility. Every call has a short timeout (Electron apps
@@ -37,6 +38,39 @@ final class AXField {
         let e2 = AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &g)
         if e2 == .success, let v = g, CFGetTypeID(v) == AXUIElementGetTypeID() { return (AXField(v as! AXUIElement), "") }
         return (nil, "no focused element (AX errors: system-wide \(e1.rawValue), app \(e2.rawValue))")
+    }
+
+    /// for a remembered element when the focus query fails: still focused / still answering / gone
+    func liveness() -> Liveness {
+        if let v = attr(kAXFocusedAttribute) as? Bool { return v ? .focused : .dead }
+        return selection != nil ? .answers : .dead
+    }
+
+    /// Focus discovery when the focused-element query keeps failing: tell the app again to expose its tree, ask it
+    /// again, then search its focused window for the element that says it's focused and has a selection (bounded).
+    static func discover(app pid: pid_t, bundleId: String?) -> AXField? {
+        guard pid > 0 else { return nil }
+        enableAccessibility(pid: pid, bundleId: bundleId)
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, timeout)
+        if let e = element(attr(app, kAXFocusedUIElementAttribute)) { return AXField(e) }
+        guard let win = element(attr(app, kAXFocusedWindowAttribute)) else { return nil }
+        var queue: [(AXUIElement, Int)] = [(win, 0)]
+        var seen = 0
+        let t0 = Date()
+        while !queue.isEmpty && seen < 400 && Date().timeIntervalSince(t0) < 0.6 {
+            let (e, depth) = queue.removeFirst()
+            seen += 1
+            if (attr(e, kAXFocusedAttribute) as? Bool) == true, attr(e, kAXSelectedTextRangeAttribute) != nil { return AXField(e) }
+            guard depth < 30, let kids = attr(e, kAXChildrenAttribute) as? [AnyObject] else { continue }
+            for k in kids where CFGetTypeID(k) == AXUIElementGetTypeID() {
+                let c = k as! AXUIElement
+                AXUIElementSetMessagingTimeout(c, timeout)
+                queue.append((c, depth + 1))
+            }
+        }
+        log.notice("focus discovery: nothing focused found in \(seen, privacy: .public) elements")
+        return nil
     }
 
     /// AXValue + selected range readable? -> nil if yes, else why not
@@ -196,7 +230,9 @@ final class AXField {
         let selLength: Int
         let ns: NSString
 
-        init(text: String, base: Int, caret: Int, selLength: Int) {
+        init(text t: String, base: Int, caret: Int, selLength: Int) {
+            // web text fields hold spaces as no-break spaces: same length in UTF-16, so offsets don't move
+            let text = t.contains("\u{00A0}") ? t.replacingOccurrences(of: "\u{00A0}", with: " ") : t
             self.text = text; self.base = base; self.caret = caret; self.selLength = selLength; ns = text as NSString
         }
 
