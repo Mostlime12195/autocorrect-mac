@@ -52,3 +52,7 @@ CI (macos-15) runs the tests, including decoder parity against the Python refere
 the "Keylime Self-Signed" certificate (secrets `MAC_SIGNING_P12` / `MAC_SIGNING_PASSWORD`), checks the designated
 requirement is certificate-based, self-tests the bundle and attaches the zip to `mac-v*` tags.
 `scripts/publish.sh <version>` mirrors a release to the public models repo and updates the updater's `mac-latest.json`.
+
+## License
+
+Code: MIT (see `LICENSE`). Model weights in [autocorrect-models](https://github.com/Mostlime12195/autocorrect-models): CC BY 4.0.
