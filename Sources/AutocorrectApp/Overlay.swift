@@ -14,7 +14,7 @@ struct PopoverActions {
 /// popover is the one window that takes clicks, and it never activates Keylime or takes the keyboard.
 final class Overlay {
     enum Item {
-        case mark(CGRect, spelling: Bool)
+        case mark(CGRect, spelling: Bool, id: Int)
         case pill(id: Int, rect: CGRect, revertable: Bool)
     }
 
@@ -92,20 +92,20 @@ final class Overlay {
         var items = lastItems
         if let t = test {
             if t.until > Date() {
-                items.append(.mark(t.rect, spelling: true))
+                items.append(.mark(t.rect, spelling: true, id: -2))
                 items.append(.pill(id: -1, rect: t.rect.offsetBy(dx: 0, dy: -t.rect.height - 6), revertable: true))
             } else { test = nil }
         }
         if panels.count != NSScreen.screens.count { rebuild() }
         shown = 0
         for (frame, panel, view) in panels {
-            var marks: [(CGRect, Bool)] = []
+            var marks: [(Int, CGRect, Bool)] = []
             var pills: [(Int, CGRect, Bool)] = []
             for it in items {
                 switch it {
-                case .mark(let r, let sp):
+                case .mark(let r, let sp, let id):
                     let c = Self.flip(r)
-                    if c.intersects(frame) { marks.append((c.offsetBy(dx: -frame.minX, dy: -frame.minY), sp)) }
+                    if c.intersects(frame) { marks.append((id, c.offsetBy(dx: -frame.minX, dy: -frame.minY), sp)) }
                 case .pill(let id, let r, let rv):
                     let c = Self.flip(r)
                     if c.intersects(frame) { pills.append((id, c.offsetBy(dx: -frame.minX, dy: -frame.minY), rv)) }
@@ -114,7 +114,10 @@ final class Overlay {
             view.update(marks: marks, pills: pills)
             shown += marks.count + pills.count
             if marks.isEmpty && pills.isEmpty {
-                if panel.isVisible { panel.orderOut(nil) }
+                // after the fade-out
+                if panel.isVisible {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { if view.isEmpty { panel.orderOut(nil) } }
+                }
             } else if !panel.isVisible {
                 panel.orderFrontRegardless()
                 if !panel.isVisible { log.error("overlay window didn't come up on screen \(NSStringFromRect(frame), privacy: .public)") }
@@ -150,15 +153,27 @@ final class Overlay {
         p.contentView = bg
         p.hasShadow = true
         p.alphaValue = 0
+        // fades in, sliding up a couple of points
+        let endFrame = p.frame
+        if !reduceMotion { p.setFrame(endFrame.offsetBy(dx: 0, dy: -3), display: false) }
         p.orderFrontRegardless()
-        NSAnimationContext.runAnimationGroup { ctx in ctx.duration = 0.12; p.animator().alphaValue = 1 }
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.14
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            p.animator().alphaValue = 1
+            if !reduceMotion { p.animator().setFrame(endFrame, display: true) }
+        }
         bubble = p
         log.info("preview bubble at \(NSStringFromRect(p.frame), privacy: .public)")
     }
 
     func hidePreview() {
-        bubble?.orderOut(nil)
+        guard let b = bubble else { return }
         bubble = nil
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.1
+            b.animator().alphaValue = 0
+        }, completionHandler: { b.orderOut(nil) })
     }
 
     // MARK: suggestion popover
@@ -204,10 +219,29 @@ final class Overlay {
             r.frame = CGRect(x: pad, y: y, width: w - 2 * pad, height: rowH)
             bg.addSubview(r)
         }
-        p.contentView = bg
+        // a plain container, so the menu itself can be scaled
+        let holder = NSView(frame: bg.frame)
+        holder.wantsLayer = true
+        holder.addSubview(bg)
+        p.contentView = holder
         p.alphaValue = 0
         p.orderFrontRegardless()
-        NSAnimationContext.runAnimationGroup { ctx in ctx.duration = 0.1; p.animator().alphaValue = 1 }
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.12
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            p.animator().alphaValue = 1
+        }
+        if !reduceMotion, let l = bg.layer {
+            // grows out of the underline: from slightly smaller and a few points up, toward its top edge
+            let a = CABasicAnimation(keyPath: "transform")
+            var t = CATransform3DMakeTranslation(0, 4, 0)
+            t = CATransform3DScale(t, 0.96, 0.96, 1)
+            a.fromValue = NSValue(caTransform3D: t)
+            a.toValue = NSValue(caTransform3D: CATransform3DIdentity)
+            a.duration = 0.16
+            a.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            l.add(a, forKey: "grow")
+        }
         popover = p
         onPopoverFrame?(Self.flip(p.frame))
     }
@@ -224,13 +258,27 @@ final class Overlay {
 final class PopoverRow: NSView {
     private let label: NSTextField
     private let action: () -> Void
-    private var hover = false { didSet { needsDisplay = true; label.textColor = hover ? .selectedMenuItemTextColor : .labelColor } }
+    private let highlight = CALayer()
+    private var hover = false {
+        didSet {
+            label.textColor = hover ? .selectedMenuItemTextColor : .labelColor
+            CATransaction.begin()
+            CATransaction.setAnimationDuration(0.1)
+            highlight.opacity = hover ? 1 : 0
+            CATransaction.commit()
+        }
+    }
 
     init(title: String, bold: Bool, action: @escaping () -> Void) {
         label = NSTextField(labelWithString: title)
         label.font = bold ? .boldSystemFont(ofSize: 13) : .systemFont(ofSize: 13)
         self.action = action
         super.init(frame: .zero)
+        wantsLayer = true
+        highlight.backgroundColor = NSColor.selectedContentBackgroundColor.cgColor
+        highlight.cornerRadius = 5
+        highlight.opacity = 0
+        layer?.addSublayer(highlight)
         addSubview(label)
     }
 
@@ -242,6 +290,10 @@ final class PopoverRow: NSView {
         super.layout()
         let s = label.intrinsicContentSize
         label.frame = CGRect(x: 12, y: (bounds.height - s.height) / 2, width: bounds.width - 20, height: s.height)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        highlight.frame = bounds.insetBy(dx: 0, dy: 1)
+        CATransaction.commit()
     }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -259,17 +311,20 @@ final class PopoverRow: NSView {
         if bounds.contains(convert(event.locationInWindow, from: nil)) { action() }
     }
 
-    override func draw(_ dirtyRect: NSRect) {
-        guard hover else { return }
-        NSColor.selectedContentBackgroundColor.setFill()
-        NSBezierPath(roundedRect: bounds.insetBy(dx: 0, dy: 1), xRadius: 5, yRadius: 5).fill()
-    }
 }
 
-/// Underlines (drawn) and pills (layers, so they can fade on their own).
+/// Lime: Keylime's accent for applied fixes
+let limeColor = NSColor(srgbRed: 0.55, green: 0.80, blue: 0.16, alpha: 1)
+
+var reduceMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+
+/// Underlines and pills as layers, so each can animate on its own: an underline sweeps in left to right and fades out
+/// when it goes; a pill flashes lime and its revert line sweeps in. Fast (~120-200 ms, ease-out); Reduce Motion
+/// keeps only short fades.
 final class OverlayView: NSView {
-    private var marks: [(CGRect, Bool)] = []
+    private var markLayers: [Int: (box: CALayer, dots: CAShapeLayer, width: CGFloat, spelling: Bool)] = [:]
     private var pillLayers: [Int: (fill: CALayer, line: CALayer)] = [:]
+    private static let easeOut = CAMediaTimingFunction(name: .easeOut)
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -281,57 +336,127 @@ final class OverlayView: NSView {
 
     override var isFlipped: Bool { false }
 
-    func update(marks: [(CGRect, Bool)], pills: [(Int, CGRect, Bool)]) {
-        self.marks = marks
-        needsDisplay = true
+    var isEmpty: Bool { markLayers.isEmpty && pillLayers.isEmpty }
+
+    /// macOS-style dotted underline: red for spelling, green for the rest (like the system's grammar marks)
+    private static func dotsPath(width: CGFloat) -> CGPath {
+        let p = CGMutablePath()
+        let d: CGFloat = 2.6, step: CGFloat = 4.2
+        var x: CGFloat = 0.5
+        while x + d <= width + 0.5 {
+            p.addEllipse(in: CGRect(x: x, y: 0.7, width: d, height: d))
+            x += step
+        }
+        return p
+    }
+
+    func update(marks: [(Int, CGRect, Bool)], pills: [(Int, CGRect, Bool)]) {
+        guard let root = layer else { return }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        let ids = Set(pills.map { $0.0 })
-        for (id, l) in pillLayers where !ids.contains(id) {
-            l.fill.removeFromSuperlayer(); l.line.removeFromSuperlayer(); pillLayers.removeValue(forKey: id)
+        // marks
+        let ids = Set(marks.map { $0.0 })
+        for (id, l) in markLayers where !ids.contains(id) {
+            markLayers.removeValue(forKey: id)
+            fadeOut(l.box)
+        }
+        for (id, r, spelling) in marks {
+            let box = CGRect(x: r.minX, y: r.minY - 2.6, width: r.width + 1, height: 4)
+            if let l = markLayers[id] {
+                l.box.position = box.origin
+                if abs(l.width - box.width) > 0.5 || l.spelling != spelling {
+                    l.box.bounds = CGRect(origin: .zero, size: box.size)
+                    l.dots.path = Self.dotsPath(width: box.width)
+                    l.dots.fillColor = (spelling ? NSColor.systemRed : NSColor.systemGreen).cgColor
+                    markLayers[id] = (l.box, l.dots, box.width, spelling)
+                }
+                continue
+            }
+            let c = CALayer()
+            c.anchorPoint = .zero
+            c.position = box.origin
+            c.bounds = CGRect(origin: .zero, size: box.size)
+            c.masksToBounds = true
+            let dots = CAShapeLayer()
+            dots.frame = CGRect(origin: .zero, size: box.size)
+            dots.path = Self.dotsPath(width: box.width)
+            dots.fillColor = (spelling ? NSColor.systemRed : NSColor.systemGreen).cgColor
+            c.addSublayer(dots)
+            root.addSublayer(c)
+            markLayers[id] = (c, dots, box.width, spelling)
+            appear(c, width: box.width, duration: 0.18)
+        }
+        // pills
+        let pids = Set(pills.map { $0.0 })
+        for (id, l) in pillLayers where !pids.contains(id) {
+            pillLayers.removeValue(forKey: id)
+            l.fill.removeFromSuperlayer()
+            fadeOut(l.line)
         }
         for (id, r, revertable) in pills {
             let pr = r.insetBy(dx: -3, dy: -1)
+            let lineFrame = CGRect(x: r.minX, y: r.minY - 1.5, width: r.width, height: 2)
             if let l = pillLayers[id] {
                 l.fill.frame = pr
-                l.line.frame = CGRect(x: r.minX, y: r.minY - 1, width: r.width, height: 1.5)
-                l.line.opacity = revertable ? 0.7 : 0
+                l.line.position = lineFrame.origin
+                l.line.bounds = CGRect(origin: .zero, size: lineFrame.size)
+                l.line.opacity = revertable ? 0.85 : 0
                 continue
             }
             let fill = CALayer()
             fill.frame = pr
             fill.cornerRadius = min(pr.height / 2, 7)
-            fill.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.32).cgColor
+            fill.backgroundColor = limeColor.withAlphaComponent(0.38).cgColor
             fill.opacity = 0
             let line = CALayer()
-            line.frame = CGRect(x: r.minX, y: r.minY - 1, width: r.width, height: 1.5)
-            line.backgroundColor = NSColor.controlAccentColor.cgColor
-            line.cornerRadius = 0.75
-            line.opacity = revertable ? 0.7 : 0
-            layer?.addSublayer(fill)
-            layer?.addSublayer(line)
+            line.anchorPoint = .zero
+            line.position = lineFrame.origin
+            line.bounds = CGRect(origin: .zero, size: lineFrame.size)
+            line.backgroundColor = limeColor.cgColor
+            line.cornerRadius = 1
+            line.opacity = revertable ? 0.85 : 0
+            root.addSublayer(fill)
+            root.addSublayer(line)
             pillLayers[id] = (fill, line)
-            // the replace animation: a highlight that fades over ~0.6 s
+            // the replace flash: lime, fading over ~0.6 s; the revert line sweeps in under it
             let a = CAKeyframeAnimation(keyPath: "opacity")
             a.values = [0.0, 1.0, 1.0, 0.0]
-            a.keyTimes = [0, 0.12, 0.35, 1]
-            a.duration = 0.65
-            fill.add(a, forKey: "pill")
+            a.keyTimes = [0, 0.15, 0.4, 1]
+            a.duration = reduceMotion ? 0.4 : 0.6
+            fill.add(a, forKey: "flash")
+            if revertable { appear(line, width: lineFrame.width, duration: 0.2) }
         }
         CATransaction.commit()
     }
 
-    override func draw(_ dirtyRect: NSRect) {
-        // macOS-style dotted underline: red for spelling, green for the rest (like the system's grammar marks)
-        for (r, spelling) in marks {
-            (spelling ? NSColor.systemRed : NSColor.systemGreen).setFill()
-            let d: CGFloat = 2.6, step: CGFloat = 4.2
-            let y = r.minY - d / 2 + 0.5
-            var x = r.minX + 0.5
-            while x + d <= r.maxX + 0.5 {
-                NSBezierPath(ovalIn: CGRect(x: x, y: y, width: d, height: d)).fill()
-                x += step
-            }
+    /// sweep in from the left (or just fade, with Reduce Motion)
+    private func appear(_ l: CALayer, width: CGFloat, duration: Double) {
+        if reduceMotion {
+            let f = CABasicAnimation(keyPath: "opacity")
+            f.fromValue = 0
+            f.toValue = l.opacity
+            f.duration = 0.12
+            l.add(f, forKey: "in")
+            return
         }
+        let a = CABasicAnimation(keyPath: "bounds.size.width")
+        a.fromValue = 0
+        a.toValue = width
+        a.duration = duration
+        a.timingFunction = Self.easeOut
+        l.add(a, forKey: "in")
+    }
+
+    private func fadeOut(_ l: CALayer) {
+        CATransaction.begin()
+        CATransaction.setCompletionBlock { l.removeFromSuperlayer() }
+        let a = CABasicAnimation(keyPath: "opacity")
+        a.fromValue = l.presentation()?.opacity ?? l.opacity
+        a.toValue = 0
+        a.duration = 0.15
+        a.timingFunction = Self.easeOut
+        l.opacity = 0
+        l.add(a, forKey: "out")
+        CATransaction.commit()
     }
 }

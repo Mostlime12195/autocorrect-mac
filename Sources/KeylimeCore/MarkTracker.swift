@@ -7,6 +7,8 @@ public struct Mark: Equatable {
     public let word: String
     public let fixes: [String]
     public let spelling: Bool
+    /// found by the pause re-check (those are the only marks a later re-check may take back)
+    public var fromIdle = false
     public var length: Int { word.utf16.count }
     public var end: Int { start + length }
 }
@@ -25,8 +27,9 @@ public final class MarkTracker {
     public var isEmpty: Bool { marks.isEmpty }
 
     @discardableResult
-    public func add(start: Int, word: String, fixes: [String], spelling: Bool) -> Mark {
-        let m = Mark(id: nextId, start: start, word: word, fixes: fixes, spelling: spelling)
+    public func add(start: Int, word: String, fixes: [String], spelling: Bool, fromIdle: Bool = false) -> Mark {
+        var m = Mark(id: nextId, start: start, word: word, fixes: fixes, spelling: spelling)
+        m.fromIdle = fromIdle
         nextId += 1
         marks.removeAll { $0.start < m.end && m.start < $0.end }
         marks.append(m)
@@ -37,8 +40,19 @@ public final class MarkTracker {
     public func remove(id: Int) { marks.removeAll { $0.id == id } }
     public func removeAll() { marks.removeAll() }
     public func removeAll(word: String) { marks.removeAll { $0.word.lowercased() == word.lowercased() } }
-    /// marks that start inside [from, to)
-    public func removeAll(in r: Range<Int>) { marks.removeAll { r.contains($0.start) } }
+    /// marks that start inside [from, to); onlyIdle: just the ones the pause re-check made
+    public func removeAll(in r: Range<Int>, onlyIdle: Bool = false) {
+        marks.removeAll { r.contains($0.start) && (!onlyIdle || $0.fromIdle) }
+    }
+
+    /// is there a mark on exactly this word already?
+    public func has(start: Int, word: String) -> Bool { marks.contains { $0.start == start && $0.word == word } }
+
+    /// put back marks set aside when the field went away for a moment (the next reconcile checks them)
+    public func restore(_ ms: [Mark]) {
+        for m in ms where !marks.contains(where: { $0.start < m.end && m.start < $0.end }) { marks.append(m) }
+        if let mx = marks.map(\.id).max(), mx >= nextId { nextId = mx + 1 }
+    }
 
     public func mark(id: Int) -> Mark? { marks.first { $0.id == id } }
 

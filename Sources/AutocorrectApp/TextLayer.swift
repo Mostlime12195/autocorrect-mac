@@ -58,9 +58,14 @@ final class TextLayer {
     private var dPids = "no field yet"
     private var dTest = "not run"
     private var dClick = "none yet"
+    private var parked: (el: AXUIElement, marks: [Mark])?
+    private var readFailSince: Date?
+    /// apps whose fields take a selection but not AX text writes: fixes are typed over the selection straight away
+    private var typedApps = Set(UserDefaults.standard.stringArray(forKey: "typedWriteApps") ?? [])
     private var rectCache: [Int: (rect: CGRect, start: Int, frame: CGRect?)] = [:]
     private var dParams = "?"
     private var dSource = "none yet"
+    private var dWritePath = "none yet"
     private var paramsFor: AXField?
     private let log = Logger(subsystem: "dev.mostlime.autocorrect-mac", category: "text")
 
@@ -250,7 +255,7 @@ final class TextLayer {
             noteClick("\(at) hit a mark at \(NSStringFromRect(h.rect)); opening fixes")
             // after the click has put the caret there; placed from the rect that was drawn (re-asking for bounds can
             // fail once the caret is inside the word)
-            q.asyncAfter(deadline: .now() + 0.12) { self.showPopover(h.id, at: h.rect) }
+            q.asyncAfter(deadline: .now() + 0.02) { self.showPopover(h.id, at: h.rect) }
         } else if let n = near {
             noteClick("\(at) missed; nearest of \(hits.count) mark(s) at \(NSStringFromRect(n.rect)), \(Int(Self.dist(n.rect, p))) pt away")
         } else {
@@ -327,7 +332,7 @@ final class TextLayer {
     private func owned(_ f: AXField, by pid: pid_t) -> Bool {
         if f.pid == pid { return true }
         let a = bundle(f.pid), b = bundle(pid)
-        return a != "?" && b != "?" && a.hasPrefix(b)
+        return a != "?" && b != "?" && (a.hasPrefix(b) || b.hasPrefix(a))
     }
     private lazy var focus = FocusTracker<AXUIElement>(grace: 3, same: { CFEqual($0, $1) })
     private var lastDiscover = Date.distantPast
@@ -375,7 +380,19 @@ final class TextLayer {
         if let n = noWrite.first(where: { CFEqual($0.el, f.el) }), n.fails >= 2 {
             setMode(.keys, "accessibility writes failed here twice (\(f.lastWrite)); retrying in a minute"); return
         }
-        if let why = f.whyNotReadable() { setMode(.keys, "\(role): \(why)"); return }
+        if let why = f.whyNotReadable() {
+            // a field that was readable a moment ago: one failed read (the app re-rendering) isn't a reason to switch
+            // to typed keystrokes; 3 s of failures is
+            if mode == .ax, f.same(field) {
+                let since = readFailSince ?? Date()
+                readFailSince = since
+                if Date().timeIntervalSince(since) < 3 { return }
+            }
+            readFailSince = nil
+            setMode(.keys, "\(role): \(why)")
+            return
+        }
+        readFailSince = nil
         setMode(.ax, "\(role): text readable")
     }
 
@@ -383,8 +400,17 @@ final class TextLayer {
         if f == nil { focus.reset() }
         if field == nil && f == nil { updateMode(nil); return }
         lock.lock(); dMarks = 0; lock.unlock()
-        noteDropped(tracker.marks.count, f == nil ? "field lost or app switched" : "focus moved to another field")
+        // set the marks aside: if this same field comes back (focus flaps, a quick app switch) they come back with it
+        if let old = field, !tracker.isEmpty {
+            parked = (old.el, tracker.marks)
+            noteDropped(tracker.marks.count, (f == nil ? "field lost or app switched" : "focus moved to another field") + "; parked, back if the field returns")
+        }
         tracker.removeAll(); pills.removeAll(); recents.removeAll(); prev = nil; keepOnce = nil; rectCache.removeAll()
+        if let f = f, let p = parked, CFEqual(p.el, f.el) {
+            tracker.restore(p.marks)
+            parked = nil
+            input.debugNote("marks: \(p.marks.count) restored (the field came back)")
+        }
         hidePreview(); closePopover()
         field = f
         updateMode(f)
@@ -550,12 +576,26 @@ final class TextLayer {
     /// one AX write with the user's keys held back meanwhile
     private func write(_ f: AXField, _ r: NSRange, old: String, new: String) -> AXField.Write {
         var res = AXField.Write.changed
-        input.gate { res = f.replace(r, old: old, new: new) }
-        // editors that take a selection but ignore AXSelectedText (Slate in Discord): type over the selection
-        if res == .unsupported && f.lastSelectionOK {
-            let first = f.lastWrite
+        let app = bundle(f.pid)
+        if typedApps.contains(app) {
+            // remembered: this app ignores AX text writes, so don't wait for one to time out
             input.gate { res = f.replaceByTyping(r, old: old, new: new) { self.input.typeTagged($0) } }
-            f.lastWrite += " (AX write: \(first))"
+            if res == .ok { lock.lock(); dWritePath = "\(app): typing over the selection (remembered)"; lock.unlock() }
+        } else {
+            input.gate { res = f.replace(r, old: old, new: new) }
+            if res == .ok { lock.lock(); dWritePath = "\(app): accessibility text write"; lock.unlock() }
+            // editors that take a selection but ignore AXSelectedText (Slate in Discord): type over the selection
+            if res == .unsupported && f.lastSelectionOK {
+                let first = f.lastWrite
+                input.gate { res = f.replaceByTyping(r, old: old, new: new) { self.input.typeTagged($0) } }
+                f.lastWrite += " (AX write: \(first))"
+                if res == .ok {
+                    typedApps.insert(app)
+                    UserDefaults.standard.set(Array(typedApps), forKey: "typedWriteApps")
+                    lock.lock(); dWritePath = "\(app): typing over the selection (AX write didn't take; remembered)"; lock.unlock()
+                    log.notice("\(app, privacy: .public): AX writes don't take, typing over the selection from now on")
+                }
+            }
         }
         lock.lock(); dWrite = "\(res): \(f.lastWrite)"; lock.unlock()
         if res != .ok { log.notice("write \(String(describing: res), privacy: .public): \(f.lastWrite, privacy: .public)") }
@@ -734,9 +774,10 @@ final class TextLayer {
                     let b = batch[j]
                     self.cache(b.key, fixes)
                     let s0 = winBase + offs[b.range.lowerBound], s1 = winBase + offs[b.range.upperBound]
+                    // only marks an earlier pause check made are taken back; word-end marks stay until their word changes
                     let before = self.tracker.marks.count
-                    self.tracker.removeAll(in: s0..<s1)
-                    self.noteDropped(before - self.tracker.marks.count, "sentence re-checked")
+                    self.tracker.removeAll(in: s0..<s1, onlyIdle: true)
+                    self.noteDropped(before - self.tracker.marks.count, "pause re-check no longer flags them")
                     let current = b.range.lowerBound <= caretChar && caretChar <= b.range.upperBound
                     for (fx, spelling) in fixes {
                         let a = winBase + offs[b.range.lowerBound + fx.start]
@@ -745,7 +786,10 @@ final class TextLayer {
                         switch Policy.idle(gap: fx.gap, spelling: spelling, mode: self.settings.mode,
                                            inCurrentSentence: current && a + len <= snap.caret, userWord: userWord) {
                         case .apply: applies.append((NSRange(location: a, length: len), fx.from, fx.to))
-                        case .flag: self.tracker.add(start: a, word: fx.from, fixes: fx.fixes, spelling: spelling)
+                        case .flag:
+                            if !self.tracker.has(start: a, word: fx.from) {
+                                self.tracker.add(start: a, word: fx.from, fixes: fx.fixes, spelling: spelling, fromIdle: true)
+                            }
                         case .none: break
                         }
                     }
@@ -858,6 +902,7 @@ final class TextLayer {
             "Field parameterized attributes: \(dParams)",
             "Test underline: \(dTest)",
             "Last click: \(dClick)",
+            "Write path: \(dWritePath)",
         ].joined(separator: "\n")
     }
 
@@ -967,7 +1012,7 @@ final class TextLayer {
                 }
                 guard let r = rr else { continue }
                 if let v = visible, !v.intersects(r) { hidden += 1; continue }
-                items.append(.mark(r, spelling: m.spelling))
+                items.append(.mark(r, spelling: m.spelling, id: m.id))
                 mh.append((r, m.id))
             }
             for p in pills where p.until > now {

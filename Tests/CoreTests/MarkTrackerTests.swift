@@ -80,3 +80,25 @@ final class MarkGraceTests: XCTestCase {
         XCTAssertTrue(t.isEmpty)
     }
 }
+
+final class MarkOriginTests: XCTestCase {
+    func testPauseRecheckOnlyTakesBackItsOwnMarks() {
+        let t = MarkTracker()
+        let typed = t.add(start: 0, word: "hlep", fixes: ["help"], spelling: true)
+        t.add(start: 10, word: "form", fixes: ["from"], spelling: false, fromIdle: true)
+        t.removeAll(in: 0..<20, onlyIdle: true)
+        XCTAssertEqual(t.marks.map(\.id), [typed.id])
+        XCTAssertTrue(t.has(start: 0, word: "hlep"))
+    }
+
+    func testParkedMarksComeBack() {
+        let t = MarkTracker()
+        t.add(start: 0, word: "hlep", fixes: ["help"], spelling: true)
+        let parked = t.marks
+        t.removeAll()
+        t.restore(parked)
+        XCTAssertEqual(t.marks.count, 1)
+        let n = t.add(start: 10, word: "teh", fixes: [], spelling: true)
+        XCTAssertNotEqual(n.id, parked[0].id)
+    }
+}

@@ -239,7 +239,7 @@ final class AXField {
         guard setSelectedText(new) else { setSelection(sel); lastWrite = "setting the selected text failed"; return .unsupported }
         let nr = NSRange(location: r.location, length: (new as NSString).length)
         var landed = read(nr) == new
-        for _ in 0..<10 where !landed { usleep(25_000); landed = read(nr) == new }
+        for _ in 0..<6 where !landed { usleep(20_000); landed = read(nr) == new }
         var caret = sel
         if sel.location >= NSMaxRange(r) {
             caret.location += nr.length - r.length
