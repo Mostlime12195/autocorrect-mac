@@ -99,6 +99,16 @@ final class NonWordPolicyTests: XCTestCase {
         XCTAssertEqual(Policy.boundary(base("hlep"), mode: .auto, hasPrev: false, prevOut: nil, userWord: true), .keep)
     }
 
+    func testProtectedWordsAreNotChangedEvenWhenConfident() {
+        let iphone = WordOutcome(typed: "iPhone", out: "iphone", margin: 5.6, gap: 5.6, fixes: ["iphone"], typedOOV: true)
+        XCTAssertEqual(Policy.boundary(iphone, mode: .auto, hasPrev: false, prevOut: nil, userWord: false), .flag(fixes: ["iphone"], spelling: true))
+        let stretched = WordOutcome(typed: "lllmo", out: "lmao", margin: 5.7, gap: 5.7, fixes: ["lmao"], typedOOV: true)
+        XCTAssertEqual(Policy.boundary(stretched, mode: .auto, hasPrev: false, prevOut: nil, userWord: false), .flag(fixes: ["lmao"], spelling: true))
+        // a plain confident fix still goes through
+        let teh = WordOutcome(typed: "teh", out: "the", margin: 6, gap: 6, fixes: ["the"], typedOOV: true)
+        XCTAssertEqual(Policy.boundary(teh, mode: .auto, hasPrev: false, prevOut: nil, userWord: false), .apply(out: "the", prevNew: nil, merged: false))
+    }
+
     func testNameLike() {
         XCTAssertTrue(Policy.nameLike("Mazinga", left: "I talked to"))
         XCTAssertFalse(Policy.nameLike("Hlep", left: ""))
