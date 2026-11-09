@@ -95,6 +95,49 @@ struct SettingsView: View {
     }
 }
 
+// MARK: status
+
+final class StatusModel: ObservableObject {
+    @Published var text = ""
+    var source: (() -> String)?
+    var testUnderline: (() -> Void)?
+    private var timer: Timer?
+    func start() {
+        refresh()
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.refresh() }
+    }
+    func stop() { timer?.invalidate(); timer = nil }
+    func refresh() { text = source?() ?? "" }
+}
+
+struct StatusView: View {
+    @ObservedObject var model: StatusModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ScrollView {
+                Text(model.text)
+                    .font(.system(size: 11, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            HStack {
+                Button("Show Test Underline") { model.testUnderline?() }
+                    .help("Draws a mark under the text before the caret (or at the mouse) for 4 seconds")
+                Spacer()
+                Button("Copy Diagnostics") {
+                    model.refresh()
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(model.text, forType: .string)
+                }.keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(14)
+        .frame(minWidth: 560, minHeight: 420)
+    }
+}
+
 // MARK: dictionary + excluded apps
 
 final class ListsModel: ObservableObject {

@@ -3,6 +3,7 @@ import Carbon
 import ApplicationServices
 import Engine
 import KeylimeCore
+import os
 
 /// The Accessibility text layer. The event tap only says *when* (keys, word ends, pauses); this reads the focused field,
 /// asks the corrector, writes corrections in place (one atomic AX edit, keys held back meanwhile), and keeps the
@@ -40,6 +41,17 @@ final class TextLayer {
     private var popoverRect: CGRect?
     private var previewShown = false
     private var frontPid: pid_t = 0
+    // diagnostics (status window / Copy Diagnostics)
+    private var dPath = "unknown"
+    private var dWhy = "nothing focused yet"
+    private var dRole = "?"
+    private var dApp = "?"
+    private var dWord = "none yet"
+    private var dIdle = "none yet"
+    private var dWrite = "none yet"
+    private var dDrawn = "nothing"
+    private var dMarks = 0
+    private let log = Logger(subsystem: "dev.mostlime.autocorrect-mac", category: "text")
 
     // MARK: text queue only
 
@@ -75,8 +87,8 @@ final class TextLayer {
     private var timer: DispatchSourceTimer?
     private var observer: AXObserver?
     private var enabledPids = Set<pid_t>()
-    /// elements whose AX writes didn't take: keystroke fallback there
-    private var noWrite: [AXUIElement] = []
+    /// elements whose AX writes didn't take (twice): keystroke fallback there for a minute
+    private var noWrite: [(el: AXUIElement, fails: Int, at: Date)] = []
     private var lastProbe = Date.distantPast
     private var overlayEmpty = true
 
@@ -153,15 +165,21 @@ final class TextLayer {
         let pid = app.processIdentifier
         let bid = app.bundleIdentifier
         lock.lock(); frontPid = pid; lock.unlock()
+        // our own windows (Status, Settings): keep what we know about the app being typed in, for the diagnostics
+        if pid == ProcessInfo.processInfo.processIdentifier { q.async { self.ownWindow() }; return }
         q.async {
-            if !self.enabledPids.contains(pid) {
-                self.enabledPids.insert(pid)
+            self.lock.lock(); self.dApp = bid ?? "pid \(pid)"; self.lock.unlock()
+            // every activation, and only once we're trusted (before that the call does nothing, and an app activated
+            // then would never build its tree)
+            if AXIsProcessTrusted() {
                 AXField.enableAccessibility(pid: pid, bundleId: bid)
+                self.enabledPids.insert(pid)
             }
             self.switchField(nil)
-            self.setMode(.unknown)
-            // Electron builds its tree after AXManualAccessibility: look a little later
+            self.setMode(.unknown, "app switched, looking at the focused field")
+            // Electron builds its tree a moment after AXManualAccessibility: look again a little later
             self.q.asyncAfter(deadline: .now() + 0.3) { self.probe(force: true) }
+            self.q.asyncAfter(deadline: .now() + 1.2) { if self.mode != .ax { self.probe(force: true) } }
         }
     }
 
@@ -197,7 +215,7 @@ final class TextLayer {
         case .backspace, .other:
             closePopover()
         }
-        if mode == .keys && click == nil { probe(force: false) }
+        if mode != .ax && click == nil { probe(force: false) }
         scheduleIdle(seq)
         scheduleRefresh(after: 0.05)
     }
@@ -216,31 +234,59 @@ final class TextLayer {
 
     /// look at the focused element again (force: even if we looked very recently)
     private func probe(force: Bool) {
-        if !force && Date().timeIntervalSince(lastProbe) < 3 { return }
+        if !force && Date().timeIntervalSince(lastProbe) < 1 { return }
         lastProbe = Date()
-        var f = AXField.focused()
-        if f?.pid == ProcessInfo.processInfo.processIdentifier { f = nil; switchField(nil); setMode(.unknown); return }   // our own windows
+        lock.lock(); let front = frontPid; lock.unlock()
+        let (f, why) = AXField.focused(app: front)
+        if f?.pid == ProcessInfo.processInfo.processIdentifier { ownWindow(); return }
+        if f == nil { lastFocusWhy = why }
         if let f = f, f.same(field) { updateMode(f); return }
         switchField(f)
     }
+    private var lastFocusWhy = ""
 
-    private func setMode(_ m: InputController.FieldMode) {
+    /// typing in Keylime's own windows: nothing happens there (and the diagnostics keep the last app)
+    private func ownWindow() {
+        if mode != .unknown { mode = .unknown; input.setFieldMode(.unknown) }
+        hidePreview(); closePopover()
+        DispatchQueue.main.async { self.overlay.show([]) }
+        lock.lock(); markHits = []; pillHits = []; lock.unlock()
+        overlayEmpty = true
+    }
+
+    private func setMode(_ m: InputController.FieldMode, _ why: String) {
+        let name: String
+        switch m { case .ax: name = "accessibility"; case .keys: name = "keystroke fallback"; case .unknown: name = "unknown" }
+        lock.lock()
+        let changed = dPath != name || dWhy != why
+        dPath = name; dWhy = why
+        let app = dApp
+        lock.unlock()
+        if changed { log.notice("path: \(name, privacy: .public) (\(why, privacy: .public)) app \(app, privacy: .public)") }
         if m != mode { mode = m; input.setFieldMode(m) }
     }
 
     /// nil: no focused element we can see (0.1 behaviour: keystroke fallback)
     private func updateMode(_ f: AXField?) {
-        var m = InputController.FieldMode.keys
-        if let f = f {
-            if f.isSecure { m = .ax }   // nothing happens in password fields either way
-            else if noWrite.contains(where: { CFEqual($0, f.el) }) { m = .keys }
-            else if f.snapshot() != nil { m = .ax }
+        guard let f = f else {
+            lock.lock(); dRole = "none"; lock.unlock()
+            setMode(.keys, lastFocusWhy.isEmpty ? "no focused element" : lastFocusWhy)
+            return
         }
-        setMode(m)
+        let role = (f.role ?? "?") + (f.subrole.map { "/" + $0 } ?? "")
+        lock.lock(); dRole = role; lock.unlock()
+        noWrite.removeAll { Date().timeIntervalSince($0.at) > 60 }
+        if f.isSecure { setMode(.ax, "password field: nothing happens here"); return }
+        if let n = noWrite.first(where: { CFEqual($0.el, f.el) }), n.fails >= 2 {
+            setMode(.keys, "accessibility writes failed here twice (\(f.lastWrite)); retrying in a minute"); return
+        }
+        if let why = f.whyNotReadable() { setMode(.keys, "\(role): \(why)"); return }
+        setMode(.ax, "\(role): text readable")
     }
 
     private func switchField(_ f: AXField?) {
         if field == nil && f == nil { updateMode(nil); return }
+        lock.lock(); dMarks = 0; lock.unlock()
         tracker.removeAll(); pills.removeAll(); recents.removeAll(); prev = nil; keepOnce = nil
         hidePreview(); closePopover()
         field = f
@@ -317,7 +363,9 @@ final class TextLayer {
 
     private func boundary(_ word: String, _ sep: String, _ seq: Int) {
         if field == nil || mode == .unknown { probe(force: true) }
-        guard TypingCore.correctable(word), let f = usableField(), var snap = f.snapshot(), snap.selLength == 0 else { prev = nil; return }
+        guard TypingCore.correctable(word) else { prev = nil; return }
+        guard let f = usableField() else { prev = nil; noteWord("skipped: \(notUsableWhy())"); return }
+        guard var snap = f.snapshot(), snap.selLength == 0 else { prev = nil; noteWord("skipped: field text unreadable or a selection"); return }
         var found = locate(word, snap)
         // Chromium / Electron update their accessibility text a little after the key
         for _ in 0..<3 where found == nil {
@@ -326,7 +374,7 @@ final class TextLayer {
             snap = s2
             found = locate(word, s2)
         }
-        guard let start = found else { prev = nil; input.debugNote("ax: \"\(word)\" not found before the caret"); return }
+        guard let start = found else { prev = nil; noteWord("skipped: the word isn't in the field text before the caret"); return }
         if let k = keepOnce, k.start == start, k.word == word { keepOnce = nil; prev = nil; return }
         guard start == 0 || TypingCore.isOpener(charBefore(snap, start)) else { prev = nil; return }
         let (left, sp) = TypingCore.splitLeft(textBefore(snap, start, Self.CTX_CHARS))
@@ -361,11 +409,12 @@ final class TextLayer {
         }
         switch d {
         case .keep:
+            noteWord(String(format: "kept (margin %.1f)", o.margin))
             setPrev(word, start)
         case .flag(let fixes, let spelling):
             prev = nil
             tracker.add(start: start, word: word, fixes: fixes, spelling: spelling)
-            input.debugNote("ax: flag \"\(word)\" -> \(fixes)")
+            noteWord(String(format: "underlined, %d fixes (margin %.1f, gap %.1f)", fixes.count, o.margin, o.gap))
             pushOverlay()
         case .apply(let out, let prevNew, let merged):
             guard let snap = f.snapshot() else { return }
@@ -378,7 +427,7 @@ final class TextLayer {
             }
             let range = NSRange(location: spanStart, length: (oldText as NSString).length)
             let res = write(f, range, old: oldText, new: newText)
-            input.debugNote("ax: fix \"\(oldText)\" -> \"\(newText)\" \(res)")
+            noteWord(String(format: "fixed (margin %.1f): write ", o.margin) + "\(res)")
             switch res {
             case .ok:
                 let newLen = (newText as NSString).length
@@ -403,14 +452,45 @@ final class TextLayer {
     private func write(_ f: AXField, _ r: NSRange, old: String, new: String) -> AXField.Write {
         var res = AXField.Write.changed
         input.gate { res = f.replace(r, old: old, new: new) }
+        lock.lock(); dWrite = "\(res): \(f.lastWrite)"; lock.unlock()
+        if res != .ok { log.notice("write \(String(describing: res), privacy: .public): \(f.lastWrite, privacy: .public)") }
         return res
     }
 
     private func writesFailed(_ f: AXField) {
-        input.debugNote("ax: writes don't take here: keystroke fallback")
-        noWrite.append(f.el)
+        log.error("accessibility write failed: \(f.lastWrite, privacy: .public)")
+        if let i = noWrite.firstIndex(where: { CFEqual($0.el, f.el) }) {
+            noWrite[i].fails += 1; noWrite[i].at = Date()
+        } else {
+            noWrite.append((f.el, 1, Date()))
+        }
         if noWrite.count > 20 { noWrite.removeFirst() }
         updateMode(f)
+    }
+
+    private func notUsableWhy() -> String {
+        if settings.mode == .off { return "mode is Off" }
+        if !engine.ready { return "model not ready" }
+        if input.isInputMethod { return "an input method is active" }
+        if settings.isExcluded(input.frontmostBundleId) { return "app is excluded/paused" }
+        if IsSecureEventInputEnabled() { return "secure input is on" }
+        if mode != .ax { lock.lock(); defer { lock.unlock() }; return "path is \(dPath): \(dWhy)" }
+        if field?.isSecure == true { return "password field" }
+        return "no field"
+    }
+
+    /// last end-of-word decision (no typed text in it)
+    private func noteWord(_ s: String) {
+        let t = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+        lock.lock(); dWord = "\(t): \(s)"; lock.unlock()
+        log.info("word end: \(s, privacy: .public)")
+        input.debugNote("ax: word end: " + s)
+    }
+
+    private func noteIdle(_ s: String) {
+        let t = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+        lock.lock(); dIdle = "\(t): \(s)"; lock.unlock()
+        log.info("pause: \(s, privacy: .public)")
     }
 
     /// the text changed by our own edit: marks, pills and revertable corrections after it move
@@ -510,7 +590,9 @@ final class TextLayer {
     }
 
     private func idle(_ seq: Int) {
-        guard seqNow == seq, let f = usableField(), let snap = f.snapshot(), snap.selLength == 0 else { return }
+        guard seqNow == seq else { return }
+        guard let f = usableField() else { noteIdle("skipped: \(notUsableWhy())"); return }
+        guard let snap = f.snapshot(), snap.selLength == 0 else { noteIdle("skipped: field text unreadable or a selection"); return }
         let caretRel = snap.caret - snap.base
         let lo = max(0, caretRel - Self.IDLE_CHARS), hi = min(snap.ns.length, caretRel + Self.IDLE_CHARS)
         guard hi > lo else { return }
@@ -529,7 +611,7 @@ final class TextLayer {
             let key = left + "\u{1}" + String(chars[r])
             if sentenceCache[key] == nil { todo.append((r, key, left)) }
         }
-        guard !todo.isEmpty else { return }
+        guard !todo.isEmpty else { noteIdle("nothing new to check"); return }
         // nearest to the caret first
         todo.sort { dist($0.range, caretChar) < dist($1.range, caretChar) }
         let batch = Array(todo.prefix(Self.IDLE_SENTENCES))
@@ -537,8 +619,10 @@ final class TextLayer {
         let more = todo.count > batch.count
         engine.checkSentences(reqs, cancelled: { [weak self] in self?.seqNow != seq }) { [weak self] res in
             self?.q.async {
-                guard let self = self, let res = res, self.seqNow == seq, f.same(self.field), let s2 = f.snapshot(),
-                      s2.base == snap.base, s2.caret == snap.caret, s2.text == snap.text else { return }
+                guard let self = self else { return }
+                guard let res = res, self.seqNow == seq, f.same(self.field), let s2 = f.snapshot(),
+                      s2.base == snap.base, s2.caret == snap.caret, s2.text == snap.text else { self.noteIdle("dropped: typing resumed or the text changed"); return }
+                self.noteIdle("checked \(res.count) sentence(s), \(res.reduce(0) { $0 + $1.count }) flagged")
                 var applies: [(range: NSRange, from: String, to: String)] = []
                 for (j, fixes) in res.enumerated() {
                     let b = batch[j]
@@ -562,7 +646,7 @@ final class TextLayer {
                 for ap in applies.sorted(by: { $0.range.location > $1.range.location }) {
                     guard self.seqNow == seq else { break }
                     let r = self.write(f, ap.range, old: ap.from, new: ap.to)
-                    self.input.debugNote("ax: idle fix \"\(ap.from)\" -> \"\(ap.to)\" \(r)")
+                    self.noteIdle("fixed a word after the pause: write \(r)")
                     if r == .unsupported { self.writesFailed(f); break }
                     guard r == .ok else { continue }
                     let newLen = (ap.to as NSString).length
@@ -642,6 +726,46 @@ final class TextLayer {
         pushOverlay()
     }
 
+    // MARK: diagnostics
+
+    /// any thread
+    func diagnostics() -> String {
+        let excluded = settings.isExcluded(input.frontmostBundleId)
+        lock.lock(); defer { lock.unlock() }
+        return [
+            "Accessibility trusted: \(AXIsProcessTrusted() ? "yes" : "NO")",
+            "Mode: \(settings.mode.rawValue), preview \(settings.preview ? "on" : "off")",
+            "Frontmost app: \(dApp)\(excluded ? " (excluded/paused)" : "")",
+            "Focused element: \(dRole)",
+            "Path: \(dPath) (\(dWhy))",
+            "Last word end: \(dWord)",
+            "Last pause check: \(dIdle)",
+            "Last write: \(dWrite)",
+            "Marks: \(dMarks); drawn: \(dDrawn)",
+        ].joined(separator: "\n")
+    }
+
+    /// "Show Test Underline": a mark under the text before the caret in the focused field, or at the mouse
+    func showTestUnderline(mouse: CGPoint) {
+        q.async {
+            self.lock.lock(); let front = self.frontPid; self.lock.unlock()
+            var rect: CGRect? = nil
+            var why = ""
+            let (f, fwhy) = AXField.focused(app: front)
+            if let f = f, let sel = f.selection {
+                let a = max(0, sel.location - 5)
+                rect = f.bounds(NSRange(location: a, length: max(1, sel.location - a)))
+                why = rect == nil ? "focused field gave no bounds for the text before the caret: drew at the mouse" : "drew under the text before the caret"
+            } else {
+                why = f == nil ? "\(fwhy): drew at the mouse" : "focused element has no selection: drew at the mouse"
+            }
+            let r = rect ?? CGRect(x: mouse.x - 40, y: mouse.y - 10, width: 80, height: 18)
+            self.log.notice("test underline: \(why, privacy: .public) at \(NSStringFromRect(r), privacy: .public)")
+            self.lock.lock(); self.dDrawn = "test underline: \(why)"; self.lock.unlock()
+            DispatchQueue.main.async { self.overlay.showTest(r) }
+        }
+    }
+
     // MARK: overlay
 
     private func addPill(_ r: NSRange, _ text: String, revertable: Bool = true) -> Int {
@@ -701,7 +825,14 @@ final class TextLayer {
                 if revertable { ph.append((r, p.until, p.id)) }
             }
         }
-        lock.lock(); markHits = mh; pillHits = ph; lock.unlock()
+        let why: String
+        if let f = field {
+            if f.pid != front { why = "focused field isn't in the frontmost app" }
+            else if mode != .ax { why = "not on the accessibility path" }
+            else if tracker.isEmpty && pills.isEmpty { why = "no marks" }
+            else { why = "\(items.count) of \(tracker.marks.count + pills.count) on screen (others: no bounds or scrolled away)" }
+        } else { why = "no field" }
+        lock.lock(); markHits = mh; pillHits = ph; dMarks = tracker.marks.count; dDrawn = why; lock.unlock()
         if items.isEmpty && overlayEmpty { stopTimer(); return }
         overlayEmpty = items.isEmpty
         DispatchQueue.main.async { self.overlay.show(items) }

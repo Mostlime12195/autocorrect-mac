@@ -1,12 +1,16 @@
 import AppKit
 import ApplicationServices
+import os
 
-/// The focused text element, read and written through Accessibility. Every call has a 50 ms timeout. Never call from
-/// the event-tap thread. Offsets and ranges are UTF-16, like AX ranges.
+/// The focused text element, read and written through Accessibility. Every call has a short timeout (Electron apps
+/// answer slower than 50 ms when busy). Never call from the event-tap thread. Offsets and ranges are UTF-16.
 final class AXField {
-    static let timeout: Float = 0.05
+    static let timeout: Float = 0.1
+    static let log = Logger(subsystem: "dev.mostlime.autocorrect-mac", category: "ax")
     let el: AXUIElement
     let pid: pid_t
+    /// why the last write did what it did (for the status window)
+    var lastWrite = ""
 
     init(_ el: AXUIElement) {
         self.el = el
@@ -16,13 +20,35 @@ final class AXField {
         AXUIElementSetMessagingTimeout(el, Self.timeout)
     }
 
-    static func focused() -> AXField? {
+    static func focused() -> AXField? { focused(app: 0).field }
+
+    /// the focused element: system-wide, else asked of the frontmost app (Chromium / Electron sometimes only answer
+    /// that way). -> the field, or why there's none
+    static func focused(app pid: pid_t) -> (field: AXField?, why: String) {
         let sys = AXUIElementCreateSystemWide()
         AXUIElementSetMessagingTimeout(sys, timeout)
         var f: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(sys, kAXFocusedUIElementAttribute as CFString, &f) == .success, let v = f,
-              CFGetTypeID(v) == AXUIElementGetTypeID() else { return nil }
-        return AXField(v as! AXUIElement)
+        let e1 = AXUIElementCopyAttributeValue(sys, kAXFocusedUIElementAttribute as CFString, &f)
+        if e1 == .success, let v = f, CFGetTypeID(v) == AXUIElementGetTypeID() { return (AXField(v as! AXUIElement), "") }
+        guard pid > 0 else { return (nil, "no focused element (system-wide AX error \(e1.rawValue))") }
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, timeout)
+        var g: CFTypeRef?
+        let e2 = AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &g)
+        if e2 == .success, let v = g, CFGetTypeID(v) == AXUIElementGetTypeID() { return (AXField(v as! AXUIElement), "") }
+        return (nil, "no focused element (AX errors: system-wide \(e1.rawValue), app \(e2.rawValue))")
+    }
+
+    /// AXValue + selected range readable? -> nil if yes, else why not
+    func whyNotReadable() -> String? {
+        var v: CFTypeRef?
+        let ev = AXUIElementCopyAttributeValue(el, kAXValueAttribute as CFString, &v)
+        var r: CFTypeRef?
+        let er = AXUIElementCopyAttributeValue(el, kAXSelectedTextRangeAttribute as CFString, &r)
+        if er != .success { return "no selected range (AX error \(er.rawValue))" }
+        if ev != .success && count == nil { return "no text value (AX error \(ev.rawValue))" }
+        if ev == .success && !(v is String) && count == nil { return "value isn't text" }
+        return snapshot() == nil ? "text not readable" : nil
     }
 
     func same(_ o: AXField?) -> Bool { o.map { CFEqual(el, $0.el) } ?? false }
@@ -130,17 +156,18 @@ final class AXField {
             if s2 == sel { break }
             sel = s2
         }
-        guard let cur = read(r) else { return .unsupported }
-        guard cur == old else { return .changed }
-        guard setSelection(r) else { return .unsupported }
-        if selection != r {
-            usleep(10_000)
-            if selection != r { setSelection(sel); return .unsupported }
-        }
-        guard setSelectedText(new) else { setSelection(sel); return .unsupported }
+        guard let cur = read(r) else { lastWrite = "couldn't read the word"; return .unsupported }
+        guard cur == old else { lastWrite = "text changed under us"; return .changed }
+        guard setSelection(r) else { lastWrite = "setting the selection failed"; return .unsupported }
+        // Chromium / Electron apply a selection change asynchronously: wait for it to show (never write without it,
+        // or the text would go in at the caret)
+        var selected = selection == r
+        for _ in 0..<15 where !selected { usleep(10_000); selected = selection == r }
+        if !selected { setSelection(sel); lastWrite = "selection never took (\(String(describing: selection)) != \(r))"; return .unsupported }
+        guard setSelectedText(new) else { setSelection(sel); lastWrite = "setting the selected text failed"; return .unsupported }
         let nr = NSRange(location: r.location, length: (new as NSString).length)
         var landed = read(nr) == new
-        for _ in 0..<3 where !landed { usleep(40_000); landed = read(nr) == new }
+        for _ in 0..<10 where !landed { usleep(25_000); landed = read(nr) == new }
         var caret = sel
         if sel.location >= NSMaxRange(r) {
             caret.location += nr.length - r.length
@@ -148,10 +175,14 @@ final class AXField {
             caret = NSRange(location: NSMaxRange(nr), length: 0)
         }
         if landed {
-            if !setSelection(caret) || selection != caret { usleep(15_000); setSelection(caret) }
+            setSelection(caret)
+            var back = selection == caret
+            for _ in 0..<5 where !back { usleep(10_000); back = selection == caret; if !back { setSelection(caret) } }
+            lastWrite = back ? "ok" : "ok, caret restore unconfirmed"
             return .ok
         }
-        if read(r) == old { setSelection(sel); return .unsupported }
+        if read(r) == old { setSelection(sel); lastWrite = "the new text never showed up"; return .unsupported }
+        lastWrite = "text after the write isn't what we wrote"
         return .changed
     }
 

@@ -13,6 +13,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var overlay: Overlay!
     private var settingsWindow: NSWindow?
     private let settingsModel = SettingsModel()
+    private var statusWindow: NSWindow?
+    private let statusModel = StatusModel()
     private let store = ModelStore()
     private let settings = Settings.shared
     private var user: UserData!
@@ -43,6 +45,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if let a = n.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication { self?.layer.appActivated(a) }
         }
         settingsModel.onChange = { [weak self] in self?.refreshIcon() }
+        statusModel.source = { [weak self] in self?.diagnostics() ?? "" }
+        statusModel.testUnderline = { [weak self] in self?.showTestUnderline() }
         settingsModel.openLists = { [weak self] in self?.openLists() }
         Updater.shared.onChange = { [weak self] in self?.refreshIcon() }
 
@@ -220,7 +224,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if !input.tapRunning { menu.addItem(item("Grant Accessibility Permission…", #selector(openPermission))) }
         menu.addItem(.separator())
         menu.addItem(item("Check for Updates…", #selector(checkUpdates)))
-        menu.addItem(item("Copy Debug Log", #selector(copyDebugLog)))
+        menu.addItem(item("Status…", #selector(openStatus)))
+        menu.addItem(item("Show Test Underline", #selector(showTestUnderline)))
+        menu.addItem(item("Copy Diagnostics", #selector(copyDebugLog)))
         menu.addItem(disabled("Version \(Updater.currentVersion)"))
         menu.addItem(item("Quit Keylime", #selector(quit), "q"))
     }
@@ -239,7 +245,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func copyDebugLog() {
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(input.debugLog, forType: .string)
+        NSPasteboard.general.setString(diagnostics(), forType: .string)
+    }
+
+    /// everything the status window shows (no typed text from the accessibility path)
+    private func diagnostics() -> String {
+        let log = input.debugLog.split(separator: "\n").suffix(40).joined(separator: "\n")
+        let tap = input.tapRunning ? "running" : "NOT running"
+        return "Keylime \(Updater.currentVersion) on macOS \(ProcessInfo.processInfo.operatingSystemVersionString)\n" +
+            "Event tap: \(tap); engine: \(engine.status); keyboard: \(input.layoutName)\n" +
+            "System autocorrect: \(SystemAutocorrect.isOn ? "on" : "off")\n" +
+            layer.diagnostics() + "\n" + overlay.diagnostics() + "\n\nRecent events:\n" + log
+    }
+
+    @objc private func openStatus() {
+        if statusWindow == nil {
+            statusWindow = makeWindow("Keylime Status", StatusView(model: statusModel))
+            NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: statusWindow, queue: .main) {
+                [weak self] _ in self?.statusModel.stop()
+            }
+        }
+        statusModel.start()
+        NSApp.activate(ignoringOtherApps: true)
+        statusWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func showTestUnderline() {
+        let m = NSEvent.mouseLocation   // Cocoa -> AX coordinates
+        let h = NSScreen.screens.first?.frame.height ?? 0
+        layer.showTestUnderline(mouse: CGPoint(x: m.x, y: h - m.y))
     }
 
     private func modeTitle(_ m: CorrectionMode) -> String {

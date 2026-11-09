@@ -1,5 +1,6 @@
 import AppKit
 import QuartzCore
+import os
 
 struct PopoverActions {
     let pick: (String) -> Void
@@ -21,6 +22,10 @@ final class Overlay {
     private var bubble: NSPanel?
     private var popover: NSPanel?
     var onPopoverFrame: ((CGRect?) -> Void)?
+    private var lastItems: [Item] = []
+    private var test: (rect: CGRect, until: Date)?
+    private var shown = 0
+    private let log = Logger(subsystem: "dev.mostlime.autocorrect-mac", category: "overlay")
 
     init() {
         rebuild()
@@ -61,6 +66,36 @@ final class Overlay {
     }
 
     func show(_ items: [Item]) {
+        lastItems = items
+        render()
+    }
+
+    /// "Show Test Underline": a mark + pill at an AX rect for 4 s, to see the overlay draws at all
+    func showTest(_ r: CGRect) {
+        test = (r, Date().addingTimeInterval(4))
+        render()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4.1) { [weak self] in self?.render() }
+    }
+
+    /// main: what the overlay shows and where its windows are
+    func diagnostics() -> String {
+        let screens = NSScreen.screens.map { NSStringFromRect($0.frame) }.joined(separator: ", ")
+        let wins = panels.map { "\($0.panel.isVisible ? "visible" : "hidden") \(NSStringFromRect($0.panel.frame)) level \($0.panel.level.rawValue)" }
+            .joined(separator: "; ")
+        return "Overlay: \(lastItems.count) item(s) last pushed, \(shown) drawn on screens; windows: \(wins)\nScreens: \(screens)" +
+            "\nPreview bubble: \(bubble == nil ? "hidden" : "visible \(NSStringFromRect(bubble!.frame))")"
+    }
+
+    private func render() {
+        var items = lastItems
+        if let t = test {
+            if t.until > Date() {
+                items.append(.mark(t.rect, spelling: true))
+                items.append(.pill(id: -1, rect: t.rect.offsetBy(dx: 0, dy: -t.rect.height - 6), revertable: true))
+            } else { test = nil }
+        }
+        if panels.count != NSScreen.screens.count { rebuild() }
+        shown = 0
         for (frame, panel, view) in panels {
             var marks: [(CGRect, Bool)] = []
             var pills: [(Int, CGRect, Bool)] = []
@@ -75,11 +110,16 @@ final class Overlay {
                 }
             }
             view.update(marks: marks, pills: pills)
+            shown += marks.count + pills.count
             if marks.isEmpty && pills.isEmpty {
                 if panel.isVisible { panel.orderOut(nil) }
             } else if !panel.isVisible {
                 panel.orderFrontRegardless()
+                if !panel.isVisible { log.error("overlay window didn't come up on screen \(NSStringFromRect(frame), privacy: .public)") }
             }
+        }
+        if !items.isEmpty && shown == 0 {
+            log.notice("\(items.count) overlay item(s) fall outside every screen: \(items.map { "\($0)" }.joined(separator: " "), privacy: .public)")
         }
     }
 
@@ -110,6 +150,7 @@ final class Overlay {
         p.orderFrontRegardless()
         NSAnimationContext.runAnimationGroup { ctx in ctx.duration = 0.12; p.animator().alphaValue = 1 }
         bubble = p
+        log.info("preview bubble at \(NSStringFromRect(p.frame), privacy: .public)")
     }
 
     func hidePreview() {

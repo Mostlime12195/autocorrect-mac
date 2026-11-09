@@ -245,7 +245,7 @@ final class InputController {
         let d = core.key(.text(s), canCorrect: keys && canCorrect())
         if let c = s.first, s.count == 1, TypingCore.isWordChar(c) {
             layer?.signal(.char)
-        } else if let c = s.first, s.count == 1, TypingCore.SEPARATORS.contains(c), !word.isEmpty {
+        } else if let c = s.first, s.count == 1, TypingCore.SEPARATORS.contains(c), !word.isEmpty, !keys {
             layer?.signal(.boundary(word: word, sep: s))
         } else {
             layer?.signal(.other)
