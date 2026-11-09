@@ -25,6 +25,9 @@ final class EngineHost {
     var ready: Bool { stateLock.lock(); defer { stateLock.unlock() }; return _ready }
     var status: String { stateLock.lock(); defer { stateLock.unlock() }; return _status }
     var modelLabel: String { stateLock.lock(); defer { stateLock.unlock() }; return _modelLabel }
+    private var _modelId = "none"
+    /// manifest id of the loaded model ("none" before one is loaded): upload events carry it
+    var modelId: String { stateLock.lock(); defer { stateLock.unlock() }; return _modelId }
     var lastMs: Double { stateLock.lock(); defer { stateLock.unlock() }; return _lastMs }
     /// jobs queued or running on the engine queue (the usage meter's backlog)
     private var _pending = 0
@@ -104,7 +107,7 @@ final class EngineHost {
                     self.scorer?.step.close()
                     self.scorer = sc
                     self.params = spec.standardParams
-                    self.stateLock.lock(); self._modelLabel = spec.label; self.stateLock.unlock()
+                    self.stateLock.lock(); self._modelLabel = spec.label; self._modelId = spec.id; self.stateLock.unlock()
                     self.setStatus("Ready · \(spec.label)", ready: true)
                     self.log.info("session \(spec.id) ready in \(secs)s, \(threads) threads")
                     completion?(nil)
