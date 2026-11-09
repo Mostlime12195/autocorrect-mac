@@ -52,6 +52,9 @@ final class TextLayer {
     private var dDrawn = "nothing"
     private var dMarks = 0
     private var dFocus = "no queries yet"
+    private var dBounds = "no marks queried yet"
+    private var dPids = "no field yet"
+    private var dTest = "not run"
     private let log = Logger(subsystem: "dev.mostlime.autocorrect-mac", category: "text")
 
     // MARK: text queue only
@@ -169,6 +172,7 @@ final class TextLayer {
         // our own windows (Status, Settings): keep what we know about the app being typed in, for the diagnostics
         if pid == ProcessInfo.processInfo.processIdentifier { q.async { self.ownWindow() }; return }
         q.async {
+            self.ownFront = false
             self.lock.lock(); self.dApp = bid ?? "pid \(pid)"; self.lock.unlock()
             // every activation, and only once we're trusted (before that the call does nothing, and an app activated
             // then would never build its tree)
@@ -176,8 +180,14 @@ final class TextLayer {
                 AXField.enableAccessibility(pid: pid, bundleId: bid)
                 self.enabledPids.insert(pid)
             }
-            self.switchField(nil)
-            self.setMode(.unknown, "app switched, looking at the focused field")
+            if let f = self.field, self.owned(f, by: pid) {
+                // back from one of our windows (or a menu): same field, same marks
+                self.updateMode(f)
+                self.pushOverlay()
+            } else {
+                self.switchField(nil)
+                self.setMode(.unknown, "app switched, looking at the focused field")
+            }
             // Electron builds its tree a moment after AXManualAccessibility: look again a little later
             self.q.asyncAfter(deadline: .now() + 0.3) { self.probe(force: true) }
             self.q.asyncAfter(deadline: .now() + 1.2) { if self.mode != .ax { self.probe(force: true) } }
@@ -265,11 +275,30 @@ final class TextLayer {
         lock.unlock()
     }
     private var lastFocusWhy = ""
+    /// a Keylime window (Status, Settings) is in front: nothing happens, the diagnostics keep the app's state
+    private var ownFront = false
+    private var bundleCache: [pid_t: String] = [:]
+
+    private func bundle(_ pid: pid_t) -> String {
+        if let b = bundleCache[pid] { return b }
+        let b = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier ?? "?"
+        if bundleCache.count > 64 { bundleCache.removeAll() }
+        bundleCache[pid] = b
+        return b
+    }
+
+    /// the field belongs to that app: same process, or one of its helpers (com.x.App.helper ...)
+    private func owned(_ f: AXField, by pid: pid_t) -> Bool {
+        if f.pid == pid { return true }
+        let a = bundle(f.pid), b = bundle(pid)
+        return a != "?" && b != "?" && a.hasPrefix(b)
+    }
     private lazy var focus = FocusTracker<AXUIElement>(grace: 3, same: { CFEqual($0, $1) })
     private var lastDiscover = Date.distantPast
 
     /// typing in Keylime's own windows: nothing happens there (and the diagnostics keep the last app)
     private func ownWindow() {
+        ownFront = true
         if mode != .unknown { mode = .unknown; input.setFieldMode(.unknown) }
         hidePreview(); closePopover()
         DispatchQueue.main.async { self.overlay.show([]) }
@@ -495,6 +524,7 @@ final class TextLayer {
     }
 
     private func notUsableWhy() -> String {
+        if ownFront { return "a Keylime window is in front" }
         if settings.mode == .off { return "mode is Off" }
         if !engine.ready { return "model not ready" }
         if input.isInputMethod { return "an input method is active" }
@@ -768,7 +798,10 @@ final class TextLayer {
             "Last word end: \(dWord)",
             "Last pause check: \(dIdle)",
             "Last write: \(dWrite)",
+            "Processes: \(dPids)",
             "Marks: \(dMarks); drawn: \(dDrawn)",
+            "Bounds (last mark queried): \(dBounds)",
+            "Test underline: \(dTest)",
         ].joined(separator: "\n")
     }
 
@@ -778,17 +811,26 @@ final class TextLayer {
             self.lock.lock(); let front = self.frontPid; self.lock.unlock()
             var rect: CGRect? = nil
             var why = ""
-            let (f, fwhy) = AXField.focused(app: front)
+            // the field we're holding first (the focus query itself may be failing), else a fresh query
+            var f = self.field
+            var source = "held field"
+            var fwhy = ""
+            if f == nil || f?.selection == nil {
+                let fresh = AXField.focused(app: front)
+                f = fresh.field; fwhy = fresh.why; source = "fresh focus query"
+            }
             if let f = f, let sel = f.selection {
                 let a = max(0, sel.location - 5)
-                rect = f.bounds(NSRange(location: a, length: max(1, sel.location - a)))
-                why = rect == nil ? "focused field gave no bounds for the text before the caret: drew at the mouse" : "drew under the text before the caret"
+                let range = sel.location > a ? NSRange(location: a, length: sel.location - a) : NSRange(location: sel.location, length: 1)
+                let (b, detail) = f.boundsDetail(range)
+                rect = b
+                why = b == nil ? "\(source): no bounds (\(detail)), drew at the mouse" : "\(source): under the text before the caret, \(detail)"
             } else {
-                why = f == nil ? "\(fwhy): drew at the mouse" : "focused element has no selection: drew at the mouse"
+                why = f == nil ? "\(fwhy): drew at the mouse" : "\(source) has no selection: drew at the mouse"
             }
             let r = rect ?? CGRect(x: mouse.x - 40, y: mouse.y - 10, width: 80, height: 18)
             self.log.notice("test underline: \(why, privacy: .public) at \(NSStringFromRect(r), privacy: .public)")
-            self.lock.lock(); self.dDrawn = "test underline: \(why)"; self.lock.unlock()
+            self.lock.lock(); self.dTest = why; self.lock.unlock()
             DispatchQueue.main.async { self.overlay.showTest(r) }
         }
     }
@@ -834,13 +876,24 @@ final class TextLayer {
         var items: [Overlay.Item] = []
         var mh: [(rect: CGRect, id: Int)] = []
         var ph: [(rect: CGRect, until: Date, id: Int)] = []
-        if let f = field, f.pid == front, mode == .ax, !(tracker.isEmpty && pills.isEmpty) {
+        if ownFront {
+            // our window is in front: draw nothing, but keep the last real state for the status window
+            lock.lock(); markHits = []; pillHits = []; lock.unlock()
+            if !overlayEmpty { overlayEmpty = true; DispatchQueue.main.async { self.overlay.show([]) } }
+            stopTimer()
+            return
+        }
+        var boundsNote: String? = nil
+        var hidden = 0
+        if let f = field, owned(f, by: front), mode == .ax, !(tracker.isEmpty && pills.isEmpty) {
             let visible = f.visibleFrame()
             let t0 = Date()
             for m in tracker.marks.suffix(40) {
                 if Date().timeIntervalSince(t0) > 0.15 { break }   // a slow app: draw what we have
-                guard let r = f.bounds(NSRange(location: m.start, length: m.length)) else { continue }
-                if let v = visible, !v.intersects(r) { continue }
+                let (b, detail) = f.boundsDetail(NSRange(location: m.start, length: m.length))
+                boundsNote = detail
+                guard let r = b else { continue }
+                if let v = visible, !v.intersects(r) { hidden += 1; continue }
                 items.append(.mark(r, spelling: m.spelling))
                 mh.append((r, m.id))
             }
@@ -854,12 +907,17 @@ final class TextLayer {
         }
         let why: String
         if let f = field {
-            if f.pid != front { why = "focused field isn't in the frontmost app" }
+            if !owned(f, by: front) { why = "focused field isn't in the frontmost app (field pid \(f.pid) \(bundle(f.pid)), frontmost pid \(front) \(bundle(front)))" }
             else if mode != .ax { why = "not on the accessibility path" }
             else if tracker.isEmpty && pills.isEmpty { why = "no marks" }
-            else { why = "\(items.count) of \(tracker.marks.count + pills.count) on screen (others: no bounds or scrolled away)" }
+            else { why = "\(items.count) of \(tracker.marks.count + pills.count) drawn, \(hidden) outside the visible field" }
         } else { why = "no field" }
-        lock.lock(); markHits = mh; pillHits = ph; dMarks = tracker.marks.count; dDrawn = why; lock.unlock()
+        if let n = boundsNote, !n.hasPrefix("ok") { log.notice("bounds failed: \(n, privacy: .public)") }
+        lock.lock()
+        markHits = mh; pillHits = ph; dMarks = tracker.marks.count; dDrawn = why
+        if let n = boundsNote { dBounds = n }
+        if let f = field { dPids = "field pid \(f.pid) (\(bundle(f.pid))), frontmost pid \(front) (\(bundle(front)))" }
+        lock.unlock()
         if items.isEmpty && overlayEmpty { stopTimer(); return }
         overlayEmpty = items.isEmpty
         DispatchQueue.main.async { self.overlay.show(items) }

@@ -137,13 +137,37 @@ final class AXField {
     }
 
     /// screen rect (AX coordinates: top-left origin, y down) of a range; nil when the app doesn't say or says nonsense
-    func bounds(_ r: NSRange) -> CGRect? {
+    func bounds(_ r: NSRange) -> CGRect? { boundsDetail(r).rect }
+
+    /// bounds of a range, with what happened (for the status window). Falls back to the first and last character
+    /// joined, for fields that only answer single characters.
+    func boundsDetail(_ r: NSRange) -> (rect: CGRect?, detail: String) {
+        let (a, why) = rawBounds(r)
+        if let a = a { return (a, "ok \(NSStringFromRect(a))") }
+        guard r.length > 1 else { return (nil, why) }
+        let (b, _) = rawBounds(NSRange(location: r.location, length: 1))
+        let (c, _) = rawBounds(NSRange(location: NSMaxRange(r) - 1, length: 1))
+        if let b = b, let c = c, abs(b.midY - c.midY) < b.height / 2 {
+            let u = b.union(c)
+            return (u, "ok from single characters \(NSStringFromRect(u)) (whole range: \(why))")
+        }
+        return (nil, why + (b == nil ? "; single characters failed too" : "; single characters on different lines"))
+    }
+
+    private func rawBounds(_ r: NSRange) -> (CGRect?, String) {
         var cr = CFRange(location: r.location, length: r.length)
-        guard let arg = AXValueCreate(.cfRange, &cr), let v = param(kAXBoundsForRangeParameterizedAttribute, arg),
-              CFGetTypeID(v) == AXValueGetTypeID() else { return nil }
+        guard let arg = AXValueCreate(.cfRange, &cr) else { return (nil, "bad range") }
+        var v: CFTypeRef?
+        let e = AXUIElementCopyParameterizedAttributeValue(el, kAXBoundsForRangeParameterizedAttribute as CFString, arg, &v)
+        guard e == .success, let val = v, CFGetTypeID(val) == AXValueGetTypeID() else {
+            return (nil, e == .success ? "answer isn't a rect" : "AX error \(e.rawValue) for range \(r.location)+\(r.length)")
+        }
         var rect = CGRect.zero
-        guard AXValueGetValue(v as! AXValue, .cgRect, &rect) else { return nil }
-        return rect.width > 0 && rect.height > 2 && rect.height < 200 && rect.width < 2000 ? rect : nil
+        guard AXValueGetValue(val as! AXValue, .cgRect, &rect) else { return (nil, "answer isn't a rect") }
+        guard rect.width > 0 && rect.height > 2 && rect.height < 200 && rect.width < 2000 else {
+            return (nil, "unusable rect \(NSStringFromRect(rect))")
+        }
+        return (rect, "")
     }
 
     static func frame(_ el: AXUIElement) -> CGRect? {

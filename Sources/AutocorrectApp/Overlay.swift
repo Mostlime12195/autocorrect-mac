@@ -25,6 +25,7 @@ final class Overlay {
     private var lastItems: [Item] = []
     private var test: (rect: CGRect, until: Date)?
     private var shown = 0
+    private var lastDrew: (count: Int, at: Date)?
     private let log = Logger(subsystem: "dev.mostlime.autocorrect-mac", category: "overlay")
 
     init() {
@@ -82,7 +83,8 @@ final class Overlay {
         let screens = NSScreen.screens.map { NSStringFromRect($0.frame) }.joined(separator: ", ")
         let wins = panels.map { "\($0.panel.isVisible ? "visible" : "hidden") \(NSStringFromRect($0.panel.frame)) level \($0.panel.level.rawValue)" }
             .joined(separator: "; ")
-        return "Overlay: \(lastItems.count) item(s) last pushed, \(shown) drawn on screens; windows: \(wins)\nScreens: \(screens)" +
+        let drew = lastDrew.map { "\($0.count) item(s) \(String(format: "%.0f", Date().timeIntervalSince($0.at))) s ago" } ?? "never"
+        return "Overlay: \(lastItems.count) item(s) last pushed, \(shown) drawn on screens; last drew something: \(drew); windows: \(wins)\nScreens: \(screens)" +
             "\nPreview bubble: \(bubble == nil ? "hidden" : "visible \(NSStringFromRect(bubble!.frame))")"
     }
 
@@ -118,6 +120,7 @@ final class Overlay {
                 if !panel.isVisible { log.error("overlay window didn't come up on screen \(NSStringFromRect(frame), privacy: .public)") }
             }
         }
+        if shown > 0 { lastDrew = (shown, Date()) }
         if !items.isEmpty && shown == 0 {
             log.notice("\(items.count) overlay item(s) fall outside every screen: \(items.map { "\($0)" }.joined(separator: " "), privacy: .public)")
         }
