@@ -26,6 +26,12 @@ final class InputController {
     private let injectQ = DispatchQueue(label: "ac.inject", qos: .userInteractive)
     private let source = CGEventSource(stateID: .privateState)
     private var tap: CFMachPort?
+    /// keys whose keyDown is queued, held or in flight: only their keyUps wait. Every other keyUp goes out at once,
+    /// or the app sees the key as still down (press-and-hold accent menu, key repeat).
+    private var heldDowns = Set<Int64>()
+    /// recent decisions for "Copy Debug Log" (memory only)
+    private var debug: [String] = []
+    private let t0 = Date()
 
     // cached environment (updated from the main thread)
     private var frontApp: String?
@@ -114,6 +120,9 @@ final class InputController {
         lock.lock()
         defer { lock.unlock() }
         if case .idle = state {} else {
+            let code = event.getIntegerValueField(.keyboardEventKeycode)
+            if type == .keyUp && !heldDowns.contains(code) { return Unmanaged.passUnretained(event) }
+            if type == .keyDown { heldDowns.insert(code) }
             if let c = event.copy() { queue.append(c) }
             return nil
         }
@@ -126,6 +135,8 @@ final class InputController {
         case .undo(let inj, let undone):
             let evs = synth(inj)
             if evs.isEmpty { return nil }
+            note("undo del=\(inj.deletes) ins=\(inj.text.debugDescription)")
+            heldDowns.insert(Int64(kVK_Delete))   // the swallowed backspace's keyUp waits for the edit
             state = .injecting(tagAll(evs))
             injectQ.async { self.post(evs) }
             learn(undone)
@@ -177,6 +188,8 @@ final class InputController {
     /// lock held: the separator `sep` is swallowed until the correction resolves or times out
     private func beginHold(_ job: CorrectionJob, _ sep: CGEvent) {
         guard let copy = sep.copy() else { _ = core.resolve(job, nil); return }
+        heldDowns.insert(sep.getIntegerValueField(.keyboardEventKeycode))
+        note("hold \(job.id) \"\(job.typed)\" sep=\(job.sep.debugDescription) app=\(frontApp ?? "?")")
         held = (job, copy, frontApp)
         state = .holding(job.id)
         let id = job.id
@@ -194,11 +207,14 @@ final class InputController {
         // the user switched apps meanwhile: never type into another app
         let r2 = h.app == frontApp ? r : nil
         var evs: [CGEvent] = []
-        if let inj = core.resolve(h.job, r2) {
+        let inj = core.resolve(h.job, r2)
+        if let inj = inj {
             evs = synth(inj)
             corrections += 1
         }
-        evs.append(h.sep)
+        note("resolve \(id) " + (r == nil ? "timeout/skip" : r2 == nil ? "app changed" : "out=\"\(r!.out)\"")
+             + (inj.map { " del=\($0.deletes) ins=\($0.text.debugDescription)" } ?? " no edit") + " queued=\(queue.count)")
+        evs.append(fresh(h.sep))
         state = .injecting(tagAll(evs))
         lock.unlock()
         post(evs)
@@ -216,9 +232,9 @@ final class InputController {
         while !queue.isEmpty {
             let e = queue.removeFirst()
             let d = process(e.type, e)
-            if case .pass = d { out.append(e); continue }
+            if case .pass = d { out.append(fresh(e)); continue }
             if case .hold(let job) = d { startJob = job; startSep = e }
-            if case .undo(let inj, let u) = d { undoEvents = synth(inj); undone = u }
+            if case .undo(let inj, let u) = d { undoEvents = synth(inj); undone = u; note("undo del=\(inj.deletes) ins=\(inj.text.debugDescription)") }
             break
         }
         if let job = startJob, let sep = startSep {
@@ -229,7 +245,7 @@ final class InputController {
             return
         }
         let evs = out + undoEvents
-        if evs.isEmpty { state = .idle; lock.unlock(); if let u = undone { learn(u) }; return }
+        if evs.isEmpty { state = .idle; heldDowns.removeAll(); lock.unlock(); if let u = undone { learn(u) }; return }
         state = .injecting(tagAll(evs))
         lock.unlock()
         post(evs)
@@ -258,6 +274,21 @@ final class InputController {
         return evs
     }
 
+    /// lock held: a replayed real key as a brand-new event from our source (fresh timestamp); mouse events as copies
+    private func fresh(_ e: CGEvent) -> CGEvent {
+        guard e.type == .keyDown || e.type == .keyUp,
+              let n = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(e.getIntegerValueField(.keyboardEventKeycode)),
+                              keyDown: e.type == .keyDown) else { return e }
+        n.flags = e.flags
+        var len = 0
+        var buf = [UniChar](repeating: 0, count: 8)
+        e.keyboardGetUnicodeString(maxStringLength: 8, actualStringLength: &len, unicodeString: &buf)
+        if len > 0 { n.keyboardSetUnicodeString(stringLength: len, unicodeString: &buf) }
+        n.setIntegerValueField(.keyboardEventAutorepeat, value: e.getIntegerValueField(.keyboardEventAutorepeat))
+        n.setIntegerValueField(.keyboardEventKeyboardType, value: e.getIntegerValueField(.keyboardEventKeyboardType))
+        return n
+    }
+
     private func key(_ code: CGKeyCode, _ text: String?) -> [CGEvent] {
         var out: [CGEvent] = []
         for down in [true, false] {
@@ -274,14 +305,32 @@ final class InputController {
 
     /// injectQ: post in order; the watchdog finishes the batch if its echo never comes back (tap disabled, ...)
     private func post(_ evs: [CGEvent]) {
+        // paced: Chromium/Electron apps (Discord, Slack, Chrome) reorder edits posted back to back
+        var prevDelete = false
         for e in evs {
+            let isDelete = e.type == .keyDown && e.getIntegerValueField(.keyboardEventKeycode) == Int64(kVK_Delete)
+            if prevDelete && !isDelete && e.type == .keyDown { usleep(6000) }
+            if e.type == .keyDown { prevDelete = isDelete }
             e.post(tap: .cghidEventTap)
-            usleep(300)
+            usleep(2000)
         }
         if let last = evs.last {
             let s = last.getIntegerValueField(.eventSourceUserData) & 0xffff_ffff
             injectQ.asyncAfter(deadline: .now() + .milliseconds(600)) { [weak self] in self?.echoed(s) }
         }
+    }
+
+    // MARK: debug log
+
+    /// lock held
+    private func note(_ s: String) {
+        debug.append(String(format: "%8.3f ", Date().timeIntervalSince(t0)) + s)
+        if debug.count > 300 { debug.removeFirst(debug.count - 300) }
+    }
+
+    var debugLog: String {
+        lock.lock(); defer { lock.unlock() }
+        return "Autocorrect \(Updater.currentVersion), keyboard \(layout.name), holdMs \(settings.holdMs)\n" + debug.joined(separator: "\n")
     }
 
     // MARK: learning

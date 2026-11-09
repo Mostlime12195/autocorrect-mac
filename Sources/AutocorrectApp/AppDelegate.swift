@@ -193,6 +193,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if !input.tapRunning { menu.addItem(item("Grant Accessibility Permission…", #selector(openPermission))) }
         menu.addItem(.separator())
         menu.addItem(item("Check for Updates…", #selector(checkUpdates)))
+        menu.addItem(item("Copy Debug Log", #selector(copyDebugLog)))
         menu.addItem(disabled("Version \(Updater.currentVersion)"))
         menu.addItem(item("Quit Autocorrect", #selector(quit), "q"))
     }
@@ -207,6 +208,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let it = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         it.isEnabled = false
         return it
+    }
+
+    @objc private func copyDebugLog() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(input.debugLog, forType: .string)
     }
 
     @objc private func toggleEnabled() { settings.enabled.toggle(); refreshIcon() }
