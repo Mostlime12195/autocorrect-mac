@@ -264,7 +264,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settingsWindow?.makeKeyAndOrderFront(nil)
     }
 
-    @objc private func installUpdate() {
+    @MainActor @objc private func installUpdate() {
         guard let l = Updater.shared.available else { return }
         Task { await Updater.shared.install(l) }
     }

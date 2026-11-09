@@ -1,4 +1,4 @@
-# Autocorrect for Mac
+# Keylime for Mac
 
 Menu bar app that fixes typos as you type, in any app, with our small on-device language model (same decoder as the
 Android keyboard). Nothing you type leaves the Mac.
@@ -7,25 +7,37 @@ Apple Silicon only, macOS 13+.
 
 ## Install
 
-1. Download `Autocorrect-mac-<version>.zip` from the
+1. Download `Keylime-mac-<version>.zip` from the
    [releases](https://github.com/Mostlime12195/autocorrect-models/releases?q=mac-v) and unzip it.
-2. Move `Autocorrect.app` to Applications.
-3. First launch: the app is ad-hoc signed, not notarized, so macOS blocks a double-click. Either
-   right-click the app → **Open** → **Open** (on macOS 15: try once, then System Settings → Privacy & Security →
-   **Open Anyway**), or run `xattr -dr com.apple.quarantine /Applications/Autocorrect.app` and open it normally.
-4. Grant **Accessibility** when asked (System Settings → Privacy & Security → Accessibility). The setup window closes by
-   itself once it's on. After an update macOS may ask again: remove the old entry and re-add the app.
+2. Move `Keylime.app` to Applications. (Coming from 0.1.x: quit and delete the old `Autocorrect.app`.)
+3. First launch: the app is self-signed, not notarized, so macOS blocks a double-click. Either right-click the app →
+   **Open** → **Open** (on macOS 15: try once, then System Settings → Privacy & Security → **Open Anyway**), or run
+   `xattr -dr com.apple.quarantine /Applications/Keylime.app` and open it normally.
+4. Grant **Accessibility** when asked (System Settings → Privacy & Security → Accessibility). Remove an old
+   "Autocorrect" entry if there is one. The setup window closes by itself once it's on.
 5. The model downloads on first run (about 79 MB for m2, 42 MB for m1).
 
-Turn off macOS's own "Correct spelling automatically" (Keyboard → Text Input → Edit) so the two don't fight.
+From 0.2.0 on, updates install themselves (menu → Check for Updates…, or the daily check) and keep the Accessibility
+grant: every build is signed with the same certificate.
 
 ## Use
 
-- Corrections happen when you finish a word (space, punctuation, return).
-- Backspace right after a correction undoes it; the word is remembered as "not a typo".
-- Menu: on/off, pause in the current app, model (m2 106M int4 default, m1 34M lighter), personal dictionary and
-  excluded apps, check for updates. Terminals, IDEs and password managers are excluded by default; password fields and
-  secure input are always skipped.
+- **Fix confident typos, underline the rest** (default): when you finish a word, a fix the model is sure about is
+  applied in place (a short highlight shows it; click the word within a few seconds, or press backspace right away, to
+  undo). Words it's unsure about get a dotted underline. After a 1 s pause the sentence is checked again with the words
+  that came after it.
+- **Suggest only**: underlines, never changes the text.
+- Click an underlined word: up to 3 fixes, **Ignore**, **Add to Dictionary**.
+- Optional: a preview bubble with the fix the current word is about to get (Space accepts, Esc cancels).
+- Settings can turn off macOS's own "Correct spelling automatically" so the two don't fight (open apps may need a
+  restart).
+- Menu: mode, pause in the current app, model (m2 106M int4 default, m1 34M lighter), personal dictionary and excluded
+  apps, updates. Terminals, IDEs and password managers are excluded by default; password fields and secure input are
+  always skipped.
+
+How it works: the event tap only times things (word ends, pauses); the text is read and written through Accessibility
+(the word is selected and replaced in one edit, caret put back, result verified). Where an app doesn't expose its text
+that way, Keylime falls back to typing the fix as keystrokes, with no underlines.
 
 ## Build
 
@@ -33,9 +45,10 @@ Turn off macOS's own "Correct spelling automatically" (Keyboard → Text Input �
 scripts/fetch_ort.sh                     # onnxruntime 1.31.1 (osx-arm64) -> vendor/
 scripts/fetch_models.sh models           # graphs for the parity tests
 AC_MODEL_DIR=$PWD/models swift test -c release -Xswiftc -enable-testing
-scripts/build_app.sh 0.1.0               # dist/Autocorrect.app + zip
+scripts/build_app.sh 0.2.0               # dist/Keylime.app + zip (SIGN_IDENTITY=<sha1> to sign; ad-hoc otherwise)
 ```
 
-CI (macos-14) runs the tests, including decoder parity against the Python reference on both models, builds the app,
-self-tests the bundle and attaches the zip to `mac-v*` tags. `scripts/publish.sh <version>` mirrors a release to the
-public models repo and updates the updater's `mac-latest.json`.
+CI (macos-15) runs the tests, including decoder parity against the Python reference on both models, signs the app with
+the "Keylime Self-Signed" certificate (secrets `MAC_SIGNING_P12` / `MAC_SIGNING_PASSWORD`), checks the designated
+requirement is certificate-based, self-tests the bundle and attaches the zip to `mac-v*` tags.
+`scripts/publish.sh <version>` mirrors a release to the public models repo and updates the updater's `mac-latest.json`.
