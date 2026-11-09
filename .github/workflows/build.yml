@@ -8,7 +8,7 @@ on:
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: macos-15   # macos-14 is "not supported" for this account
     timeout-minutes: 60
     defaults:
       run:
