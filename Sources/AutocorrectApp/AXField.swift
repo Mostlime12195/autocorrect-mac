@@ -267,6 +267,12 @@ final class AXField {
         var selected = selection == r
         for _ in 0..<15 where !selected { usleep(10_000); selected = selection == r }
         guard selected else { setSelection(sel); lastWrite = "typed: selection never took"; return .unsupported }
+        // web editors (Slate in Discord) copy the DOM selection into their own model a moment later: typing before
+        // that lands at their old caret. Let it settle, and check it's still the word.
+        usleep(Self.TYPE_SETTLE_US)
+        guard selection == r, read(r) == old else {
+            setSelection(sel); lastWrite = "typed: selection or word changed while settling"; return .changed
+        }
         type(new)
         let nr = NSRange(location: r.location, length: (new as NSString).length)
         var landed = read(nr) == new
@@ -314,6 +320,9 @@ final class AXField {
             return i >= 0 && i < ns.length ? ns.character(at: i) : nil
         }
     }
+
+    /// pause between selecting a word and typing over it (see replaceByTyping)
+    static let TYPE_SETTLE_US: useconds_t = 150_000
 
     static let FULL_CHARS = 30_000
     static let WINDOW_CHARS = 8_000

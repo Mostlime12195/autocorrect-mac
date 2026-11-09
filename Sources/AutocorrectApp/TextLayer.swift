@@ -66,6 +66,7 @@ final class TextLayer {
     private var dParams = "?"
     private var dSource = "none yet"
     private var dWritePath = "none yet"
+    private var dPick = "none yet"
     private var paramsFor: AXField?
     private let log = Logger(subsystem: "dev.mostlime.autocorrect-mac", category: "text")
 
@@ -255,7 +256,7 @@ final class TextLayer {
             noteClick("\(at) hit a mark at \(NSStringFromRect(h.rect)); opening fixes")
             // after the click has put the caret there; placed from the rect that was drawn (re-asking for bounds can
             // fail once the caret is inside the word)
-            q.asyncAfter(deadline: .now() + 0.02) { self.showPopover(h.id, at: h.rect) }
+            q.asyncAfter(deadline: .now() + 0.1) { self.showPopover(h.id, at: h.rect) }
         } else if let n = near {
             noteClick("\(at) missed; nearest of \(hits.count) mark(s) at \(NSStringFromRect(n.rect)), \(Int(Self.dist(n.rect, p))) pt away")
         } else {
@@ -833,7 +834,7 @@ final class TextLayer {
         popoverMark = id
         noteClick("popover shown for a mark with \(m.fixes.count) fix(es)")
         let actions = PopoverActions(
-            pick: { [weak self] s in self?.q.async { self?.applyFix(id, s) } },
+            pick: { [weak self] s in self?.q.async { self?.notePick("chose a fix from the menu"); self?.applyFix(id, s) } },
             ignore: { [weak self] in self?.q.async { self?.ignore(id) } },
             add: { [weak self] in self?.q.async { self?.addToDictionary(id) } })
         DispatchQueue.main.async { self.overlay.showPopover(below: rect, word: m.word, fixes: m.fixes, actions: actions) }
@@ -847,17 +848,37 @@ final class TextLayer {
 
     private func applyFix(_ id: Int, _ to: String) {
         closePopover()
-        guard let f = field, let m = tracker.mark(id: id) else { return }
-        let range = NSRange(location: m.start, length: m.length)
+        guard let f = field else { notePick("failed: no field any more"); return }
+        guard let m = tracker.mark(id: id) else { notePick("failed: the mark was removed before the fix ran"); return }
+        guard let snap = f.snapshot() else { notePick("failed: couldn't read the field's text"); return }
+        // the mark's offset can be stale (parked and restored, text edited before it): find the word again
+        guard let at = MarkTracker.locate(m, in: snap.text, base: snap.base) else {
+            let there = snap.sub(NSRange(location: m.start, length: m.length)) ?? "nothing"
+            notePick("failed: \"\(m.word)\" isn't in the field any more (reads \"\(there)\" there)")
+            tracker.remove(id: id)
+            pushOverlay()
+            return
+        }
+        let range = NSRange(location: at, length: m.length)
+        let t0 = Date()
         let r = write(f, range, old: m.word, new: to)
+        let ms = Int(Date().timeIntervalSince(t0) * 1000)
         input.debugNote("ax: pick \"\(m.word)\" -> \"\(to)\" \(r)")
         if r == .unsupported { writesFailed(f) }
-        guard r == .ok else { return }
+        guard r == .ok else { notePick("failed after \(ms) ms: write \(r): \(f.lastWrite)"); return }
+        notePick("fixed in \(ms) ms: \(f.lastWrite)" + (at != m.start ? " (the word had moved \(at - m.start) chars)" : ""))
         tracker.remove(id: id)
         let newLen = (to as NSString).length
-        edited(at: m.start, oldLen: m.length, newLen: newLen)
-        _ = addPill(NSRange(location: m.start, length: newLen), to, revertable: false)
+        edited(at: at, oldLen: m.length, newLen: newLen)
+        _ = addPill(NSRange(location: at, length: newLen), to, revertable: false)
         pushOverlay()
+    }
+
+    private func notePick(_ s: String) {
+        let t = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+        lock.lock(); dPick = "\(t): \(s)"; lock.unlock()
+        log.notice("pick: \(s, privacy: .public)")
+        input.debugNote("pick: " + s)
     }
 
     private func ignore(_ id: Int) {
@@ -903,6 +924,7 @@ final class TextLayer {
             "Test underline: \(dTest)",
             "Last click: \(dClick)",
             "Write path: \(dWritePath)",
+            "Last pick: \(dPick)",
         ].joined(separator: "\n")
     }
 

@@ -102,3 +102,18 @@ final class MarkOriginTests: XCTestCase {
         XCTAssertNotEqual(n.id, parked[0].id)
     }
 }
+
+final class MarkLocateTests: XCTestCase {
+    func testPickFindsAWordWhoseOffsetIsStale() {
+        let t = MarkTracker()
+        let m = t.add(start: 4, word: "hlep", fixes: ["help"], spelling: true)
+        XCTAssertEqual(MarkTracker.locate(m, in: "can hlep you"), 4)
+        // text typed before it since the mark was made (or a parked mark coming back)
+        XCTAssertEqual(MarkTracker.locate(m, in: "so can hlep you"), 7)
+        XCTAssertEqual(MarkTracker.locate(m, in: "xx so can hlep you", base: 0), 10)
+        // the word was edited away: nothing to fix
+        XCTAssertNil(MarkTracker.locate(m, in: "can help you"))
+        // never a partial word
+        XCTAssertNil(MarkTracker.locate(m, in: "can hlepx you"))
+    }
+}

@@ -102,6 +102,15 @@ public final class MarkTracker {
 
     public func isMissing(_ id: Int) -> Bool { missingSince[id] != nil }
 
+    /// where a mark's word is now in `text` (from `base`): at its offset, else the nearest whole-word occurrence
+    /// within SLACK (its offset can be stale: parked marks, edits before it); nil when it's gone
+    public static func locate(_ m: Mark, in text: String, base: Int = 0) -> Int? {
+        let u = Array(text.utf16), w = Array(m.word.utf16)
+        let rel = m.start - base
+        if wholeWord(u, w, at: rel) { return m.start }
+        return nearest(u, w, around: rel, slack: SLACK).map { base + $0 }
+    }
+
     public static func isWordUnit(_ c: UInt16) -> Bool {
         if (65...90).contains(c) || (97...122).contains(c) || (48...57).contains(c) || c == 39 || c == 0x2019 { return true }
         if c < 128 { return false }
