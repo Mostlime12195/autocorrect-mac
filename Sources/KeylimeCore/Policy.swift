@@ -86,9 +86,15 @@ public enum Policy {
         return .fix(best)
     }
 
-    /// a non-word that looks deliberate: mixed case, ALLCAPS, stretched, or a name
-    public static func isProtected(_ typed: String, typedOOV: Bool, nameLike: Bool) -> Bool {
-        typedOOV && (nameLike || !plainCase(typed) || stretched(typed))
+    /// A change that would undo something deliberate-looking: re-casing a mixed-case / ALLCAPS non-word
+    /// (iPhone -> iphone), or rewriting one beyond a slip; un-stretching "sooo" / "lllmo" (a slip fix like "asssault"
+    /// -> "assault" is still fine).
+    public static func isProtected(_ typed: String, out: String, typedOOV: Bool) -> Bool {
+        guard typedOOV else { return false }
+        let slip = QualityGuard.looksLikeSlip(typed, of: out)
+        if !plainCase(typed) && (typed.lowercased() == out.lowercased() || !slip) { return true }
+        if stretched(typed) && !slip { return true }
+        return false
     }
 
     /// lowercase, or one capital at the start (not ALLCAPS, not iPhone / McDonald)
@@ -152,7 +158,7 @@ public enum Policy {
         let out = TypingCore.capIWords(mg ?? o.out, penalty: penalty)
         if out == o.typed && prevNew == nil { return .keep }
         // odd-looking non-words (iPhone, NASA, sooo, a name mid-sentence) are never changed by themselves: underline
-        if forceNonWords && out != o.typed && isProtected(o.typed, typedOOV: o.typedOOV, nameLike: nameLike) { return flag }
+        if forceNonWords && out != o.typed && isProtected(o.typed, out: out, typedOOV: o.typedOOV) { return flag }
         return .apply(out: out, prevNew: prevNew, merged: mg != nil)
     }
 

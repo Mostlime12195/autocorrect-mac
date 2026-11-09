@@ -104,6 +104,12 @@ final class NonWordPolicyTests: XCTestCase {
         XCTAssertEqual(Policy.boundary(iphone, mode: .auto, hasPrev: false, prevOut: nil, userWord: false), .flag(fixes: ["iphone"], spelling: true))
         let stretched = WordOutcome(typed: "lllmo", out: "lmao", margin: 5.7, gap: 5.7, fixes: ["lmao"], typedOOV: true)
         XCTAssertEqual(Policy.boundary(stretched, mode: .auto, hasPrev: false, prevOut: nil, userWord: false), .flag(fixes: ["lmao"], spelling: true))
+        // a slip with a tripled letter is still a typo
+        let assault = WordOutcome(typed: "asssault", out: "assault", margin: 6, gap: 6, fixes: ["assault"], typedOOV: true)
+        XCTAssertEqual(Policy.boundary(assault, mode: .auto, hasPrev: false, prevOut: nil, userWord: false), .apply(out: "assault", prevNew: nil, merged: false))
+        // a capitalised typo mid-sentence keeps the margin rule
+        let nexr = WordOutcome(typed: "Nexr", out: "Next", margin: 6, gap: 6, fixes: ["Next"], typedOOV: true)
+        XCTAssertEqual(Policy.boundary(nexr, mode: .auto, hasPrev: false, prevOut: nil, userWord: false, nameLike: true), .apply(out: "Next", prevNew: nil, merged: false))
         // a plain confident fix still goes through
         let teh = WordOutcome(typed: "teh", out: "the", margin: 6, gap: 6, fixes: ["the"], typedOOV: true)
         XCTAssertEqual(Policy.boundary(teh, mode: .auto, hasPrev: false, prevOut: nil, userWord: false), .apply(out: "the", prevNew: nil, merged: false))
