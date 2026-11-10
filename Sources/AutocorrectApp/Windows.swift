@@ -19,7 +19,7 @@ struct PermissionView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Keylime needs Accessibility access").font(.title2).bold()
-            Text("It reads the text field you're typing in, fixes typos it's sure about and underlines the rest, using a small language model that runs on this Mac. Nothing you type leaves your computer (unless you turn on sharing correction data in Settings).")
+            Text("It reads the text field you're typing in and underlines likely typos with a suggested fix (or fixes the ones it's sure about, if you pick that mode), using a small language model that runs on this Mac. Nothing you type leaves your computer (unless you turn on sharing correction data in Settings).")
                 .fixedSize(horizontal: false, vertical: true)
             VStack(alignment: .leading, spacing: 6) {
                 Text("1. Click **Open System Settings**.")
@@ -105,11 +105,13 @@ struct SettingsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
+            Text("Keylime is a preview, released to show what it can do and to gather feedback and data. Expect rough edges.")
+                .font(.footnote).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
             VStack(alignment: .leading, spacing: 6) {
                 Text("Corrections").font(.headline)
                 Picker("", selection: $model.mode) {
-                    Text("Fix confident typos, underline the rest").tag(CorrectionMode.auto)
                     Text("Suggest only (underline, never change text)").tag(CorrectionMode.suggest)
+                    Text("Fix confident typos, underline the rest").tag(CorrectionMode.auto)
                     Text("Off").tag(CorrectionMode.off)
                 }.pickerStyle(.radioGroup).labelsHidden()
                 Toggle("Preview a correction while typing (Space accepts, Esc cancels)", isOn: $model.preview)

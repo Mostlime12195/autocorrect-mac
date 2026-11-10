@@ -28,12 +28,12 @@ final class Settings {
         if d.string(forKey: "mode") == nil && d.object(forKey: "enabled") != nil && !d.bool(forKey: "enabled") {
             d.set(CorrectionMode.off.rawValue, forKey: "mode")
         }
-        modeCache = CorrectionMode(rawValue: d.string(forKey: "mode") ?? "") ?? .auto
+        modeCache = CorrectionMode.stored(d.string(forKey: "mode"))
     }
 
     private var modeCache: CorrectionMode
 
-    /// auto (confident fixes applied, the rest underlined) / suggest only / off
+    /// suggest only (default) / auto (confident fixes applied, the rest underlined) / off
     var mode: CorrectionMode {
         get { lock.lock(); defer { lock.unlock() }; return modeCache }
         set { lock.lock(); modeCache = newValue; lock.unlock(); d.set(newValue.rawValue, forKey: "mode") }

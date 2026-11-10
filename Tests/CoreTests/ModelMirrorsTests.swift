@@ -3,7 +3,7 @@ import XCTest
 
 final class ModelMirrorsTests: XCTestCase {
     let nest = "https://autocorrect.mostlime.hackclub.app/autocorrect-android/"
-    let hf = "https://huggingface.co/MostLime/keylime-m2/resolve/main/"
+    let hf = "https://huggingface.co/MostLime/keylime-m2-preview/resolve/main/"
 
     func testManifestFromNestFirst() {
         XCTAssertEqual(ModelMirrors.manifestUrls, [
@@ -42,7 +42,8 @@ final class ModelMirrorsTests: XCTestCase {
         XCTAssertFalse(models.isEmpty)
         for m in models {
             let order = ModelMirrors.order(model: ModelMirrors.baseUrls(m), top: top)
-            XCTAssertTrue(order.first?.hasPrefix("https://huggingface.co/MostLime/keylime-m") ?? false, "\(m["id"] ?? "?"): \(order)")
+            let first = order.first ?? ""
+            XCTAssertTrue(first.hasPrefix("https://huggingface.co/MostLime/keylime-m") && first.hasSuffix("-preview/resolve/main/"), "\(m["id"] ?? "?"): \(order)")
             XCTAssertTrue(order.contains(nest))
             for u in order { XCTAssertFalse(u.contains("github.com"), u) }
         }

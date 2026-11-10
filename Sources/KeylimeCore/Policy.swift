@@ -3,11 +3,17 @@ import Foundation
 
 /// What Keylime does with what it finds.
 public enum CorrectionMode: String, CaseIterable {
-    /// confident fixes are applied, everything else flagged is underlined (default)
+    /// confident fixes are applied, everything else flagged is underlined
     case auto
-    /// underline everything flagged, never change the text
+    /// underline everything flagged, never change the text (the default)
     case suggest
     case off
+
+    /// the mode for users who never picked one
+    public static let defaultMode: CorrectionMode = .suggest
+
+    /// the saved mode, or the default when nothing (or an unknown value) is saved; a saved choice is always kept
+    public static func stored(_ raw: String?) -> CorrectionMode { raw.flatMap(CorrectionMode.init(rawValue:)) ?? defaultMode }
 }
 
 /// A finished word's decision, reduced to what the policy needs (built from a WordResult on the engine queue).

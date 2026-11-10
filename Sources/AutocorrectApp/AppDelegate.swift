@@ -183,6 +183,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else {
             status = engine.status
         }
+        menu.addItem(disabled("Keylime \(Updater.currentVersion) (Preview)"))
         menu.addItem(disabled(status))
         if engine.ready && engine.lastMs > 0 { menu.addItem(disabled(String(format: "Last word: %.0f ms · keyboard: %@", engine.lastMs, input.layoutName))) }
         menu.addItem(.separator())
@@ -265,7 +266,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func diagnostics() -> String {
         let log = input.debugLog.split(separator: "\n").suffix(40).joined(separator: "\n")
         let tap = input.tapRunning ? "running" : "NOT running"
-        return "Keylime \(Updater.currentVersion) on macOS \(ProcessInfo.processInfo.operatingSystemVersionString)\n" +
+        return "Keylime \(Updater.currentVersion) (preview) on macOS \(ProcessInfo.processInfo.operatingSystemVersionString)\n" +
             "Event tap: \(tap); engine: \(engine.status); keyboard: \(input.layoutName)\n" +
             "System autocorrect: \(SystemAutocorrect.isOn ? "on" : "off")\n" +
             layer.diagnostics() + "\n" + layer.usage() + "\n" + overlay.diagnostics() + "\n\nRecent events:\n" + log

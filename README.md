@@ -1,4 +1,6 @@
-# Keylime for Mac
+# Keylime for Mac (preview)
+
+Keylime and its models are a preview, released to show what they can do and to gather feedback and data.
 
 Menu bar app that fixes typos as you type, in any app, with our small on-device language model (same decoder as the
 Android keyboard). Nothing you type leaves the Mac, unless you turn on **Share correction data** in Settings (off by
@@ -25,11 +27,11 @@ grant: every build is signed with the same certificate.
 
 ## Use
 
-- **Fix confident typos, underline the rest** (default): when you finish a word, a fix the model is sure about is
+- **Suggest only** (default; a mode you picked earlier is kept): underlines likely typos, never changes the text.
+- **Fix confident typos, underline the rest**: when you finish a word, a fix the model is sure about is
   applied in place (a short highlight shows it; click the word within a few seconds, or press backspace right away, to
   undo). Words it's unsure about get a dotted underline. After a 1 s pause the sentence is checked again with the words
   that came after it.
-- **Suggest only**: underlines, never changes the text.
 - Click an underlined word: up to 3 fixes, **Ignore**, **Add to Dictionary**.
 - Optional: a preview bubble with the fix the current word is about to get (Space accepts, Esc cancels).
 - Settings can turn off macOS's own "Correct spelling automatically" so the two don't fight (open apps may need a
@@ -58,4 +60,4 @@ requirement is certificate-based, self-tests the bundle and attaches the zip to 
 
 ## License
 
-Code: MIT (see `LICENSE`). Model weights on Hugging Face ([keylime-m2](https://huggingface.co/MostLime/keylime-m2), [keylime-m1](https://huggingface.co/MostLime/keylime-m1)): CC BY 4.0.
+Code: MIT (see `LICENSE`). Model weights on Hugging Face ([keylime-m2-preview](https://huggingface.co/MostLime/keylime-m2-preview), [keylime-m1-preview](https://huggingface.co/MostLime/keylime-m1-preview)): CC BY 4.0.
