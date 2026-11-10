@@ -33,10 +33,21 @@ final class Uploader {
 
     // MARK: queue
 
-    /// a finished decision (any thread). Nothing happens unless sharing is on.
-    func record(_ d: CorrectionDecision) {
-        guard settings.shareData, let e = CorrectionEvents.make(d), let line = CorrectionEvents.line(e) else { return }
+    /// a finished decision (any thread). Nothing happens unless sharing is on. context: this field may give sentence
+    /// context; it is only used when the "Include sentence context" opt-in is on as well.
+    func record(_ d: CorrectionDecision, context: Bool = false) {
+        guard settings.shareData, let e = CorrectionEvents.make(d, includeContext: context && settings.shareContext),
+              let line = CorrectionEvents.line(e) else { return }
         q.async { self.append(line) }
+    }
+
+    /// "Include sentence context" was switched off: take the sentences out of everything still queued
+    func dropQueuedContext() {
+        q.async {
+            let ls = self.readLines()
+            let out = ls.map(CorrectionEvents.withoutContext)
+            if out != ls { self.writeLines(out) }
+        }
     }
 
     private func readLines() -> [String] {
@@ -68,11 +79,13 @@ final class Uploader {
         }
     }
 
-    /// the last n queued events, verbatim, newest first (for the preview). Reads the file directly (writes are atomic
-    /// or appends), so the main thread never waits for an upload in progress.
+    /// the last n queued events exactly as they will be sent (without sentence context unless that opt-in is on right
+    /// now), newest first (for the preview). Reads the file directly (writes are atomic or appends), so the main thread
+    /// never waits for an upload in progress.
     func preview(_ n: Int = 20) -> (lines: [String], total: Int) {
         let ls = readLines()
-        return (Array(ls.suffix(n).reversed()), ls.count)
+        let ctx = settings.shareContext
+        return (ls.suffix(n).reversed().map { CorrectionEvents.outgoing($0, context: ctx) }, ls.count)
     }
 
     func clearQueue() { q.async { self.writeLines([]) } }
@@ -139,7 +152,8 @@ final class Uploader {
         guard !lines.isEmpty else { return }
         let install = settings.installId, version = Updater.currentVersion
         let d = UploadCore.drain(lines) { chunk in
-            guard let body = UploadCore.envelope(installId: install, appVersion: version, lines: chunk) else { return (400, nil) }
+            guard let body = UploadCore.envelope(installId: install, appVersion: version, lines: chunk,
+                                                 context: self.settings.shareContext) else { return (400, nil) }
             let r = self.request("POST", Settings.uploadURL, body: body)
             if UploadCore.classify(r.code) == .skip { self.log.notice("upload rejected \(r.code): \(r.body, privacy: .public)") }
             return (r.code, r.retryAfter)

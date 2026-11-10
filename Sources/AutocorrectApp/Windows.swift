@@ -56,7 +56,19 @@ final class SettingsModel: ObservableObject {
         didSet {
             guard shareData != oldValue else { return }
             Settings.shared.shareData = shareData
-            if !shareData { Uploader.shared.clearQueue() }
+            if !shareData {
+                Uploader.shared.clearQueue()
+                // sentence context is its own opt-in: it never comes back on by itself when sharing is switched on again
+                if shareContext { shareContext = false }
+            }
+        }
+    }
+    /// the second opt-in: also send the sentence around each correction; turning it off drops queued context
+    @Published var shareContext = Settings.shared.shareContext {
+        didSet {
+            guard shareContext != oldValue else { return }
+            Settings.shared.shareContext = shareContext
+            if !shareContext { Uploader.shared.dropQueuedContext() }
         }
     }
     var openUploadPreview: (() -> Void)?
@@ -74,6 +86,7 @@ final class SettingsModel: ObservableObject {
     func reload() {
         if mode != Settings.shared.mode { mode = Settings.shared.mode }
         if shareData != Settings.shared.shareData { shareData = Settings.shared.shareData }
+        if shareContext != Settings.shared.shareContext { shareContext = Settings.shared.shareContext }
         systemAutocorrect = SystemAutocorrect.isOn
         perf = Settings.shared.perf
         reloadWords()
@@ -135,7 +148,10 @@ struct DataSharingSection: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Data sharing").font(.headline)
             Toggle("Share correction data to improve Keylime", isOn: $model.shareData)
-            Text("Sends one event per correction decision: the word, the fixes offered, what you chose, and at most 2 words before and 1 after (lowercased; numbers, emails and links dropped). Never sentences, password fields or excluded apps.")
+            Text("Sends one event per correction decision: the word, the fixes offered, what you chose, and at most 2 words before and 1 after (lowercased; numbers, emails and links dropped). Never password fields, secure input or excluded apps, and no sentences unless you turn on the switch below. Uploaded events are deleted from the server after 90 days.")
+                .font(.footnote).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+            Toggle("Include sentence context", isOn: $model.shareContext).disabled(!model.shareData)
+            Text("Also sends the sentence around each correction (up to 24 words before and 12 after, never past the sentence or the line), with numbers, emails, links, @names and anything that looks like a code replaced on this Mac first. Other words, including names, are sent as typed. Turning it off removes the sentences from everything still queued.")
                 .font(.footnote).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
             HStack {
                 Button("Upload Preview…") { model.openUploadPreview?() }
@@ -162,7 +178,8 @@ final class UploadPreviewModel: ObservableObject {
     @Published var text = ""
     func reload() {
         let p = Uploader.shared.preview(20)
-        let head = Settings.shared.shareData ? "Sharing is on." : "Sharing is off: nothing is queued or sent."
+        let head = !Settings.shared.shareData ? "Sharing is off: nothing is queued or sent."
+            : Settings.shared.shareContext ? "Sharing is on, with sentence context." : "Sharing is on (no sentence context)."
         let count = "\(p.total) event(s) queued" + (p.total > p.lines.count ? ", the newest \(p.lines.count) below" : "")
         text = ([head, count, "Last upload: \(Uploader.shared.status)", ""] + p.lines).joined(separator: "\n")
     }

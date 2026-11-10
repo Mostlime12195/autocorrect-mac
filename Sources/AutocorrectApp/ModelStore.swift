@@ -79,11 +79,11 @@ enum StoreError: Error, CustomStringConvertible {
 /// (GitHub release first, the Nest mirror second) and checked against the manifest's sha256.
 final class ModelStore {
     static let manifestUrls = [
-        "https://github.com/Mostlime12195/autocorrect-models/releases/download/models-v1/manifest.json",
+        "https://github.com/Mostlime12195/keylime-models/releases/download/models-v1/manifest.json",
         "https://autocorrect.mostlime.hackclub.app/autocorrect-android/manifest.json",
     ]
     static let fallbackBases = [
-        "https://github.com/Mostlime12195/autocorrect-models/releases/download/models-style1/",
+        "https://github.com/Mostlime12195/keylime-models/releases/download/models-style1/",
         "https://autocorrect.mostlime.hackclub.app/autocorrect-android/",
     ]
 

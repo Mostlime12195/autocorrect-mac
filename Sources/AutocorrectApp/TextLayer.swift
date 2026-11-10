@@ -1117,24 +1117,35 @@ final class TextLayer {
     }
 
     /// Hand one decision to the uploader. Only the word, its fixes and the raw text right around it go in; the
-    /// uploader's event builder scrubs that down to at most 2 words before and 1 after.
+    /// uploader's event builder scrubs that down to at most 2 words before and 1 after (plus, with the sentence-context
+    /// opt-in, the scrubbed rest of the word's sentence).
     private func report(typed: String, suggestion: String, alts: [String], oov: Bool, outcome: String, rank: Int? = nil,
                         final: String? = nil, gap: Double?, ctx: (before: String, after: String)?) {
         guard settings.shareData, let f = field,
               CorrectionEvents.recordable(secureField: f.isSecure, secureInput: IsSecureEventInputEnabled(),
-                                          excludedApp: settings.isExcluded(bundle(f.pid))) else { return }
+                                          excludedApp: settings.isExcluded(bundle(f.pid)) || CorrectionEvents.neverShared(bundleId: bundle(f.pid)))
+        else { return }
         let kind = Kinds.classify(typed: typed, fix: suggestion, typedInVocab: !oov)
-        Uploader.shared.record(CorrectionDecision(typed: typed, suggestion: suggestion, alternatives: alts, kind: kind, outcome: outcome,
-                                                  pickedRank: rank, final: final, margin: gap, textBefore: ctx?.before,
-                                                  textAfter: ctx?.after, model: engine.modelId, appVersion: Updater.currentVersion))
+        var d = CorrectionDecision(typed: typed, suggestion: suggestion, alternatives: alts, kind: kind, outcome: outcome,
+                                   pickedRank: rank, final: final, margin: gap, textBefore: ctx?.before,
+                                   textAfter: ctx?.after, model: engine.modelId, appVersion: Updater.currentVersion)
+        // a full window may start mid-word; the text after may end in the word being typed (Ctx leaves those tokens out)
+        d.beforeTruncated = ((ctx?.before ?? "") as NSString).length >= Self.ctxBeforeUnits
+        d.afterTruncated = true
+        // sentence context: only with its own opt-in (checked again in the uploader), never from a search field
+        Uploader.shared.record(d, context: settings.shareContext && CorrectionEvents.contextAllowed(subrole: f.subrole))
     }
 
-    /// the raw text around a word at an offset (about 160 UTF-16 units before, 80 after); nil when the word isn't there
+    /// raw text taken around a word for an upload event (UTF-16 units): enough for 24 words before and 12 after
+    static let ctxBeforeUnits = 240
+    static let ctxAfterUnits = 120
+
+    /// the raw text around a word at an offset (ctxBeforeUnits before, ctxAfterUnits after); nil when the word isn't there
     private func around(_ s: AXField.Snapshot, _ at: Int, _ word: String) -> (before: String, after: String)? {
         let len = (word as NSString).length
         guard len > 0, s.sub(NSRange(location: at, length: len)) == word else { return nil }
-        let end = at + len, stop = max(end, min(s.end, end + 80))
-        return (textBefore(s, at, 160), s.sub(NSRange(location: end, length: stop - end)) ?? "")
+        let end = at + len, stop = max(end, min(s.end, end + Self.ctxAfterUnits))
+        return (textBefore(s, at, Self.ctxBeforeUnits), s.sub(NSRange(location: end, length: stop - end)) ?? "")
     }
 
     /// where the word touching an offset starts

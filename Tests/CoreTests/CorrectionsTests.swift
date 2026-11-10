@@ -13,8 +13,8 @@ final class CorrectionsTests: XCTestCase {
                            final: final, margin: margin, textBefore: before, textAfter: after, model: model, appVersion: "0.3.0")
     }
 
-    func make(_ d: CorrectionDecision) -> [String: Any]? {
-        CorrectionEvents.make(d, id: "abcdef0123456789", now: Date(timeIntervalSince1970: 0))
+    func make(_ d: CorrectionDecision, context: Bool = false) -> [String: Any]? {
+        CorrectionEvents.make(d, includeContext: context, id: "abcdef0123456789", now: Date(timeIntervalSince1970: 0))
     }
 
     func alts(_ e: [String: Any]?) -> [String] {
@@ -76,11 +76,120 @@ final class CorrectionsTests: XCTestCase {
         XCTAssertFalse(CorrectionEvents.recordable(secureField: false, secureInput: false, excludedApp: true))
     }
 
+    // MARK: sentence context (the second opt-in)
+
+    func testCtxScrubberMatchesTheReferenceVectors() {
+        XCTAssertGreaterThan(CtxVectors.all.count, 30)
+        for v in CtxVectors.all {
+            let b = Ctx.before(v.left, truncated: v.lt), a = Ctx.after(v.right, truncated: v.rt)
+            XCTAssertEqual(b, v.before, "before of [\(v.left)]")
+            XCTAssertEqual(a, v.after, "after of [\(v.right)]")
+            if !b.isEmpty { XCTAssertTrue(Ctx.ok(b, max: Ctx.maxBefore), b) }
+            if !a.isEmpty { XCTAssertTrue(Ctx.ok(a, max: Ctx.maxAfter), a) }
+        }
+    }
+
+    func testCtxTokensThatCouldIdentifyAreReplaced() {
+        let cases: [(String, String)] = [
+            ("hello", "hello"), ("Hello,", "Hello,"), ("don't", "don't"), ("(ok)", "(ok)"), ("café", "café"),
+            ("555-1234", "<num>"), ("12:30", "<num>"), ("$5.00", "<num>"), ("50%", "<num>"), ("+1", "<num>"),
+            ("bob@example.com", "<email>"), ("<bob@example.com>,", "<email>"),
+            ("https://x.y/z", "<url>"), ("www.x", "<url>"), ("example.com", "<url>"), ("example.com/a/b", "<url>"),
+            ("@lime", "<handle>"), ("#general", "<handle>"), ("(@lime)", "<handle>"),
+            ("abc123", "<tok>"), ("2nd", "<tok>"), (String(repeating: "a", count: 21), "<tok>"), ("a_b", "<tok>"), ("c/d", "<tok>"),
+            ("x=y", "<tok>"), ("\u{1F600}", "<tok>"), ("dGhpcyBpcyBh", "<tok>"), ("ABCD-EFGH-IJKL", "<tok>"), ("xkcdqwrt", "<tok>"),
+            ("sk_live_abcdef", "<tok>"), ("me@", "<tok>"), ("", "<tok>"),
+        ]
+        for (t, want) in cases { XCTAssertEqual(Ctx.token(t), want, t) }
+        XCTAssertEqual(Ctx.before("call me at 555 123 4567 or "), "call me at <num> or")     // a number run is one placeholder
+        XCTAssertEqual(Ctx.before("send $5.00 to bob@example.com about "), "send <num> to <email> about")
+        XCTAssertEqual(Ctx.after(" at https://example.com/x?y=1 ok"), "at <url> ok")
+        XCTAssertEqual(Ctx.before("1 2 3 "), "")                                              // placeholders alone aren't sent
+        XCTAssertEqual(Ctx.after(" @lime #x 42"), "")
+        // what the server would refuse never passes the last check
+        for bad in ["call 555 now", "mail me@x.com", "see example.com", "hi @lime", "a\nb", "", "<num> <num> word", "<email>"] {
+            XCTAssertFalse(Ctx.ok(bad, max: Ctx.maxBefore), bad)
+        }
+    }
+
+    func testCtxIsTheCurrentSentenceOnTheSameLineAndCapped() {
+        XCTAssertEqual(Ctx.before("First one. And then I went to "), "And then I went to")
+        XCTAssertEqual(Ctx.after(" store. Another one follows."), "store.")
+        XCTAssertEqual(Ctx.before("Done! "), "")
+        XCTAssertEqual(Ctx.after(". Next sentence"), "")
+        XCTAssertEqual(Ctx.before("He asked why? Because "), "Because")
+        XCTAssertEqual(Ctx.before("line one\nsecond line with "), "second line with")
+        XCTAssertEqual(Ctx.before("line one\r\nsecond line with "), "second line with")
+        XCTAssertEqual(Ctx.after(" words\nthird line"), "words")
+        XCTAssertEqual(Ctx.after("\nnext line"), "")
+        let letters = Array("abcdefghijklmnopqrstuvwxyz")
+        let words = (0..<40).map { "w\(letters[$0 % 26])\(letters[$0 / 26])" }
+        XCTAssertEqual(Ctx.before(words.joined(separator: " ") + " "), words.suffix(24).joined(separator: " "))
+        XCTAssertEqual(Ctx.after(" " + words.joined(separator: " ")), words.prefix(12).joined(separator: " "))
+        // a window that was cut never gives half a word
+        XCTAssertEqual(Ctx.before("rtial word then ", truncated: true), "word then")
+        XCTAssertEqual(Ctx.after(" and the tail is cu", truncated: true), "and the tail is")
+    }
+
+    func testSentenceContextOnlyWithItsOwnOptIn() throws {
+        var d = decision(before: "Old sentence here. I think we should see you at ", after: " usual place at 5 ok? Then home")
+        d.beforeTruncated = false; d.afterTruncated = false
+        // off (the default): exactly the v2 fields, whatever text the decision carries
+        let off = try XCTUnwrap(make(d))
+        XCTAssertNil(off["ctx_before"]); XCTAssertNil(off["ctx_after"])
+        XCTAssertTrue(Set(off.keys).isSubset(of: Self.allowedKeys))
+        XCTAssertFalse(try XCTUnwrap(CorrectionEvents.line(off)).contains("think"))
+        // on: the rest of the sentence, scrubbed
+        let on = try XCTUnwrap(make(d, context: true))
+        XCTAssertEqual(on["ctx_before"] as? String, "I think we should see you at")
+        XCTAssertEqual(on["ctx_after"] as? String, "usual place at <num> ok?")
+        XCTAssertEqual(on["before"] as? [String], ["you", "at"]); XCTAssertEqual(on["after"] as? [String], ["usual"])
+        XCTAssertEqual(on["v"] as? Int, 3)
+        XCTAssertEqual(Set(on.keys), Set(off.keys).union(["ctx_before", "ctx_after"]))
+        // windows are treated as cut unless the app says otherwise: no half words
+        let cut = try XCTUnwrap(make(decision(before: "rtial word then ", after: " and the tail is cu"), context: true))
+        XCTAssertEqual(cut["ctx_before"] as? String, "word then"); XCTAssertEqual(cut["ctx_after"] as? String, "and the tail is")
+        // nothing useful left after the scrub: no ctx fields at all
+        let none = try XCTUnwrap(make(decision(before: "555 1234 ", after: " @lime"), context: true))
+        XCTAssertNil(none["ctx_before"]); XCTAssertNil(none["ctx_after"])
+    }
+
+    func testQueuedContextIsStrippedWhenTheOptInIsOff() throws {
+        var d = decision(before: "I think we should see you at ", after: " usual place.")
+        d.beforeTruncated = false
+        let with = try XCTUnwrap(CorrectionEvents.line(try XCTUnwrap(make(d, context: true))))
+        let plain = try XCTUnwrap(CorrectionEvents.line(try XCTUnwrap(make(d))))
+        XCTAssertTrue(with.contains("\"ctx_before\":\"I think we should see you at\""))
+        XCTAssertEqual(CorrectionEvents.withoutContext(with), plain)
+        XCTAssertEqual(CorrectionEvents.withoutContext(plain), plain)
+        // the upload and the preview (CorrectionEvents.outgoing) only carry context while the opt-in is on
+        XCTAssertEqual(CorrectionEvents.outgoing(with, context: true), with)
+        XCTAssertEqual(CorrectionEvents.outgoing(with, context: false), plain)
+        let offBody = String(data: try XCTUnwrap(UploadCore.envelope(installId: "id-1", appVersion: "0.3.0", lines: [with, plain])), encoding: .utf8) ?? ""
+        XCTAssertFalse(offBody.contains("ctx_")); XCTAssertFalse(offBody.contains("think"))
+        let onBody = String(data: try XCTUnwrap(UploadCore.envelope(installId: "id-1", appVersion: "0.3.0", lines: [with, plain], context: true)), encoding: .utf8) ?? ""
+        XCTAssertTrue(onBody.contains("\"ctx_before\":\"I think we should see you at\""))
+    }
+
+    func testAppsAndFieldsThatNeverShare() {
+        for b in ["com.1password.1password", "com.agilebits.onepassword7", "com.bitwarden.desktop", "com.apple.keychainaccess",
+                  "com.apple.Passwords", "com.apple.Terminal", "com.googlecode.iterm2", "dev.warp.Warp-Stable", "org.keepassxc.keepassxc"] {
+            XCTAssertTrue(CorrectionEvents.neverShared(bundleId: b), b)
+        }
+        for b in ["com.apple.Notes", "com.tinyspeck.slackmacgap", "com.apple.TerminalX", "org.keepassxc.keepassxc.extra"] {
+            XCTAssertFalse(CorrectionEvents.neverShared(bundleId: b), b)
+        }
+        XCTAssertFalse(CorrectionEvents.neverShared(bundleId: nil))
+        XCTAssertFalse(CorrectionEvents.contextAllowed(subrole: "AXSearchField"))
+        XCTAssertTrue(CorrectionEvents.contextAllowed(subrole: nil))
+        XCTAssertTrue(CorrectionEvents.contextAllowed(subrole: "AXStandardWindow"))
+    }
+
     // MARK: events
 
     func testKeptEvent() throws {
         let e = try XCTUnwrap(make(decision()))
-        XCTAssertEqual(e["v"] as? Int, 2)
+        XCTAssertEqual(e["v"] as? Int, 3)
         XCTAssertEqual(e["id"] as? String, "abcdef0123456789")
         XCTAssertEqual(e["day"] as? String, "1970-01-01")
         XCTAssertEqual(e["type"] as? String, "correction")
@@ -230,7 +339,7 @@ final class CorrectionsTests: XCTestCase {
         let data = try XCTUnwrap(UploadCore.envelope(installId: "id-1", appVersion: "0.3.0", lines: [line, line]))
         let doc = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         XCTAssertEqual(Set(doc.keys), ["schema", "install_id", "app_version", "events"])
-        XCTAssertEqual(doc["schema"] as? String, "autocorrect-events/2")
+        XCTAssertEqual(doc["schema"] as? String, "autocorrect-events/3")
         XCTAssertEqual((doc["events"] as? [Any])?.count, 2)
         XCTAssertEqual(UploadCore.deleteURL("https://h.example/api/v1/upload", installId: "abc"), "https://h.example/api/v1/install/abc")
         XCTAssertEqual(UploadCore.deleteURL("https://h.example/api/v1/upload/", installId: "abc"), "https://h.example/api/v1/install/abc")

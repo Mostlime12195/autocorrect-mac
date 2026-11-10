@@ -1,14 +1,14 @@
 #!/bin/bash
 # Mirror a Mac release to the PUBLIC models repo and point the in-app updater at it (run on the VPS after CI released
 # the mac-v<version> tag here):
-#  - zip -> Mostlime12195/autocorrect-models release mac-v<version>, --latest=false (the Android APKs live there too)
+#  - zip -> Mostlime12195/keylime-models release mac-v<version>, --latest=false (the Android APKs live there too)
 #  - mac-latest.json -> Nest /var/www/autocorrect-android/mac-latest.json
 # Usage: scripts/publish.sh 0.1.0
 set -euo pipefail
 V="${1:?usage: $0 <version>}"
 TAG="mac-v$V"
-REPO=Mostlime12195/autocorrect-mac
-PUB=Mostlime12195/autocorrect-models
+REPO=Mostlime12195/keylime-mac
+PUB=Mostlime12195/keylime-models
 HOST=mostlime@hackclub.app
 DIR=/var/www/autocorrect-android
 BASE=https://autocorrect.mostlime.hackclub.app/autocorrect-android

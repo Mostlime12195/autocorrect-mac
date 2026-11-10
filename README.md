@@ -3,14 +3,15 @@
 Menu bar app that fixes typos as you type, in any app, with our small on-device language model (same decoder as the
 Android keyboard). Nothing you type leaves the Mac, unless you turn on **Share correction data** in Settings (off by
 default): then only scrubbed, word-level correction events are uploaded, as described in
-[docs/upload-schema.md](docs/upload-schema.md).
+[docs/upload-schema.md](docs/upload-schema.md). A second switch, **Include sentence context** (also off by default),
+adds the scrubbed sentence around each correction to those events.
 
 Apple Silicon only, macOS 13+.
 
 ## Install
 
 1. Download `Keylime-mac-<version>.zip` from the
-   [releases](https://github.com/Mostlime12195/autocorrect-models/releases?q=mac-v) and unzip it.
+   [releases](https://github.com/Mostlime12195/keylime-models/releases?q=mac-v) and unzip it.
 2. Move `Keylime.app` to Applications. (Coming from 0.1.x: quit and delete the old `Autocorrect.app`.)
 3. First launch: the app is self-signed, not notarized, so macOS blocks a double-click. Either right-click the app →
    **Open** → **Open** (on macOS 15: try once, then System Settings → Privacy & Security → **Open Anyway**), or run
@@ -57,4 +58,4 @@ requirement is certificate-based, self-tests the bundle and attaches the zip to 
 
 ## License
 
-Code: MIT (see `LICENSE`). Model weights in [autocorrect-models](https://github.com/Mostlime12195/autocorrect-models): CC BY 4.0.
+Code: MIT (see `LICENSE`). Model weights in [keylime-models](https://github.com/Mostlime12195/keylime-models): CC BY 4.0.

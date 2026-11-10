@@ -2,9 +2,9 @@
 # model files for the tests / self-test -> $1 (default models/): both served graphs + vocabs + the manifest
 set -euo pipefail
 OUT="${1:-models}"
-BASE=https://github.com/Mostlime12195/autocorrect-models/releases/download/models-style1
+BASE=https://github.com/Mostlime12195/keylime-models/releases/download/models-style1
 mkdir -p "$OUT"
-curl -fsSL "https://github.com/Mostlime12195/autocorrect-models/releases/download/models-v1/manifest.json?cb=$RANDOM$RANDOM" -o "$OUT/manifest.json"
+curl -fsSL "https://github.com/Mostlime12195/keylime-models/releases/download/models-v1/manifest.json?cb=$RANDOM$RANDOM" -o "$OUT/manifest.json"
 python3 - "$OUT" "$BASE" <<'PY'
 import hashlib, json, os, subprocess, sys
 out, base = sys.argv[1], sys.argv[2]

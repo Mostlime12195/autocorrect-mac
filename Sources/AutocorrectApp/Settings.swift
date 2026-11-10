@@ -21,7 +21,7 @@ final class Settings {
     private var excludedCache: [String]
 
     init() {
-        d.register(defaults: ["enabled": true, "holdMs": 200, "checkUpdates": true, "preview": false, "shareData": false])
+        d.register(defaults: ["enabled": true, "holdMs": 200, "checkUpdates": true, "preview": false, "shareData": false, "shareContext": false])
         if d.array(forKey: "excludedApps") == nil { d.set(Self.defaultExcluded, forKey: "excludedApps") }
         excludedCache = d.stringArray(forKey: "excludedApps") ?? Self.defaultExcluded
         // 0.1.x had an on/off switch only
@@ -111,6 +111,12 @@ final class Settings {
     var shareData: Bool {
         get { d.bool(forKey: "shareData") }
         set { d.set(newValue, forKey: "shareData") }
+    }
+
+    /// "Include sentence context": its own opt-in, off by default, and only ever on while sharing is on
+    var shareContext: Bool {
+        get { d.bool(forKey: "shareData") && d.bool(forKey: "shareContext") }
+        set { d.set(newValue, forKey: "shareContext") }
     }
 
     /// random per-install id (not tied to the Mac or the user); a new one after "Delete my uploaded data"
