@@ -38,6 +38,6 @@ let package = Package(
             path: "Tests/EngineTests",
             resources: [.copy("Fixtures")]
         ),
-        .testTarget(name: "CoreTests", dependencies: ["KeylimeCore"], path: "Tests/CoreTests"),
+        .testTarget(name: "CoreTests", dependencies: ["Engine", "KeylimeCore"], path: "Tests/CoreTests"),
     ]
 )

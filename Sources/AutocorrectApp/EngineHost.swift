@@ -14,6 +14,7 @@ final class EngineHost {
     private var corrector: Corrector?
     private var scorer: NeuralScorer?
     private var params = DecodeParams.fallback
+    private var spec: ModelSpec?
 
     // any thread
     private let stateLock = NSLock()
@@ -49,6 +50,41 @@ final class EngineHost {
             sc.clearCache()
         }
     }
+    // style picker: the saved choice, and what's in effect for the loaded model (standard when it has no style tokens)
+    private var _style = WritingStyle.defaultStyle
+    private var _effectiveStyle = WritingStyle.defaultStyle
+    private var _supportsStyle = false
+    /// the loaded model was trained with style tokens (the Settings picker is shown only then)
+    var supportsStyle: Bool { stateLock.lock(); defer { stateLock.unlock() }; return _supportsStyle }
+    /// the style decoding uses now
+    var effectiveStyle: String { stateLock.lock(); defer { stateLock.unlock() }; return _effectiveStyle }
+
+    /// Style picker: takes effect on the engine queue (control token + params; the scorer's cache is dropped when the
+    /// token changes), no reload.
+    func setStyle(_ style: String) {
+        stateLock.lock(); _style = WritingStyle.stored(style); stateLock.unlock()
+        queue.async { self.applyStyleOnQueue() }
+    }
+
+    /// engine queue only
+    private func applyStyleOnQueue() {
+        guard let sp = spec else { return }
+        stateLock.lock()
+        let st = WritingStyle.effective(_style, supportsStyle: sp.supportsStyle)
+        _effectiveStyle = st; _supportsStyle = sp.supportsStyle
+        stateLock.unlock()
+        if let sc = scorer {
+            let id = sp.styleToken(st)
+            if sc.styleId != id { sc.styleId = id; sc.clearCache() }
+        }
+        params = sp.paramsFor(st)
+        log.info("style \(st, privacy: .public) (token \(sp.styleToken(st).map(String.init) ?? "none", privacy: .public))")
+        DispatchQueue.main.async { self.onChange?() }
+    }
+
+    /// the formal style's per-word capitals and commas: auto mode only (suggest-only never changes text)
+    private var formalWordPass: Bool { effectiveStyle == "formal" && Settings.shared.mode == .auto }
+
     var pending: Int { stateLock.lock(); defer { stateLock.unlock() }; return _pending }
     private func begin() { stateLock.lock(); _pending += 1; stateLock.unlock() }
     private func end() { stateLock.lock(); _pending -= 1; stateLock.unlock() }
@@ -93,7 +129,8 @@ final class EngineHost {
                 let tok = try SPTokenizer.fromJSON(Data(contentsOf: vocab))
                 let threads = min(4, max(1, ProcessInfo.processInfo.activeProcessorCount / 2))
                 let step = try StepModel.open(path: graph.path, meta: spec.meta, threads: threads)
-                let sc = NeuralScorer(tok: tok, step: step, styleId: spec.styleToken)
+                self.stateLock.lock(); let st = WritingStyle.effective(self._style, supportsStyle: spec.supportsStyle); self.stateLock.unlock()
+                let sc = NeuralScorer(tok: tok, step: step, styleId: spec.styleToken(st))
                 // how far its positions go (rope table = max_seq): the context setting is clamped under it
                 let mp = step.maxPosition()
                 sc.maxPos = mp
@@ -106,7 +143,8 @@ final class EngineHost {
                 self.queue.async {
                     self.scorer?.step.close()
                     self.scorer = sc
-                    self.params = spec.standardParams
+                    self.spec = spec
+                    self.applyStyleOnQueue()
                     self.stateLock.lock(); self._modelLabel = spec.label; self._modelId = spec.id; self.stateLock.unlock()
                     self.setStatus("Ready · \(spec.label)", ready: true)
                     self.log.info("session \(spec.id) ready in \(secs)s, \(threads) threads")
@@ -144,7 +182,7 @@ final class EngineHost {
         guard let c = corrector, let sc = scorer else { done(nil, false); return }
         do {
             sc.lastCtxTokens = 0
-            let r = try c.correctWord(input, scorer: sc, params: params, prev: prev, merge: merge)
+            let r = try c.correctWord(input, scorer: sc, params: params, prev: prev, merge: merge, formal: formalWordPass)
             stateLock.lock(); _lastMs = r.ms; stateLock.unlock()
             done(r, c.lex.index[input.typed.lowercased()] != nil)
         } catch {
@@ -170,6 +208,20 @@ final class EngineHost {
             }
             if cancelled() { done(nil); return }
             done(out)
+        }
+    }
+
+    /// The formal style's pause pass: commas and sentence ends (Rewind). done(changes, nil = cancelled / no model), on the
+    /// engine queue.
+    func checkPunct(_ targets: [PunctTarget], cancelled: @escaping () -> Bool, done: @escaping ([PunctChange]?) -> Void) {
+        begin()
+        queue.async {
+            defer { self.end() }
+            guard let sc = self.scorer else { done(nil); return }
+            let p = self.params
+            guard let ch = try? Rewind.check(targets, scorer: sc, lam: p.lamRe, user: self.user, pen: p.pen, cancelled: cancelled),
+                  !cancelled() else { done(nil); return }
+            done(ch)
         }
     }
 

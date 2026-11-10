@@ -96,6 +96,14 @@ public final class TypingCore {
         }.joined(separator: " ")
     }
 
+    /// The formal style's comma after a word shown with a different case (its own sentence-start capital): keep what's
+    /// shown. "if," over "If" -> "If,"
+    public static func keepCase(_ new: String, of shown: String?) -> String {
+        guard let s = shown, new.count > s.count, !new.hasPrefix(s), String(new.prefix(s.count)).lowercased() == s.lowercased(),
+              new.dropFirst(s.count).allSatisfy({ $0.isPunctuation }) else { return new }
+        return s + new.dropFirst(s.count)
+    }
+
     public var isPending: Bool { pending != nil }
 
     public func reset() {
@@ -211,7 +219,9 @@ public final class TypingCore {
         }
         let hasPrev = job.prevOut != nil
         let mg = hasPrev ? r.merge : nil
-        let prevNew = (mg == nil && hasPrev) ? r.recheck.map { capIWords($0.to) }.flatMap { $0 != job.prevOut ? $0 : nil } : nil
+        // the previous word's new text: its re-check and/or the formal style's comma after it
+        let prevNew = (mg == nil && hasPrev) ? (r.prevText ?? r.recheck?.to).map { Self.keepCase(capIWords($0), of: job.prevOut) }
+            .flatMap { $0 != job.prevOut ? $0 : nil } : nil
         let out = capIWords(mg?.to ?? r.out)
         let changed = out != job.typed || prevNew != nil
         if !changed {

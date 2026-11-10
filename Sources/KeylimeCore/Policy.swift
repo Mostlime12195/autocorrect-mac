@@ -29,7 +29,7 @@ public struct WordOutcome: Equatable {
     public let fixes: [String]
     /// "some thing" -> "something": merge of the previous word and this one
     public let merge: String?
-    /// the previous word's re-check: its new text
+    /// the previous word's new text: its re-check and/or the formal style's comma after it
     public let recheck: String?
     /// typed isn't a lexicon word (a spelling fix, not a real-word swap)
     public let typedOOV: Bool
@@ -55,7 +55,7 @@ public struct WordOutcome: Equatable {
             if fx.count == 3 { break }
         }
         self.init(typed: t, out: r.out, margin: r.margin, gap: gap, fixes: fx.map { $0.0 },
-                  merge: r.merge?.to, recheck: r.recheck?.to, typedOOV: typedOOV,
+                  merge: r.merge?.to, recheck: r.prevText ?? r.recheck?.to, typedOOV: typedOOV,
                   fixGap: fx.count > 1 ? fx[0].1 - fx[1].1 : .infinity)
     }
 }
@@ -140,10 +140,11 @@ public enum Policy {
     }
 
     /// Stage (b): a word just ended. hasPrev: the previous word is still right before it (re-check / merge possible).
-    /// nameLike: capitalised mid-sentence (Policy.nameLike); forceNonWords: false = the old margin-only rule
+    /// nameLike: capitalised mid-sentence (Policy.nameLike); forceNonWords: false = the old margin-only rule;
+    /// capI: standalone i -> I (every style except casual, which keeps text as typed)
     public static func boundary(_ o: WordOutcome, mode: CorrectionMode, hasPrev: Bool, prevOut: String?, userWord: Bool,
                                 penalty: (String, String) -> Double = { _, _ in 0 }, nameLike: Bool = false,
-                                forceNonWords: Bool = true) -> Boundary {
+                                forceNonWords: Bool = true, capI: Bool = true) -> Boundary {
         if mode == .off || userWord { return .keep }
         // re-casing a mixed-case / ALLCAPS word (iPhone -> iphone) is neither a fix nor worth an underline
         if forceNonWords && recasing(o.typed, o.out) && o.merge == nil && o.recheck == nil { return .keep }
@@ -157,8 +158,10 @@ public enum Policy {
         if mg == nil {
             switch nw {
             case .fix(let best):
-                let rc = hasPrev ? o.recheck.map { TypingCore.capIWords($0, penalty: penalty) } : nil
-                return .apply(out: TypingCore.capIWords(best, penalty: penalty), prevNew: rc != nil && rc != prevOut ? rc : nil, merged: false)
+                let rc = hasPrev ? o.recheck.map { TypingCore.keepCase(capIfOn($0, capI, penalty), of: prevOut) } : nil
+                // the formal style's capital on the same word ("teh" at a sentence start -> "The")
+                let fixed = o.out != best && o.out.lowercased() == best.lowercased() && Policy.plainCase(o.out) ? o.out : best
+                return .apply(out: capIfOn(fixed, capI, penalty), prevNew: rc != nil && rc != prevOut ? rc : nil, merged: false)
             case .ambiguous:
                 return flag
             case .notApplicable:
@@ -167,13 +170,18 @@ public enum Policy {
         }
         // unsure: mark, never edit (Android "only auto-correct when confident")
         if o.out != o.typed && mg == nil && o.margin < CONFIDENT_MARGIN { return flag }
-        let rc = (mg == nil && hasPrev) ? o.recheck.map { TypingCore.capIWords($0, penalty: penalty) } : nil
+        let rc = (mg == nil && hasPrev) ? o.recheck.map { TypingCore.keepCase(capIfOn($0, capI, penalty), of: prevOut) } : nil
         let prevNew = rc != nil && rc != prevOut ? rc : nil
-        let out = TypingCore.capIWords(mg ?? o.out, penalty: penalty)
+        let out = capIfOn(mg ?? o.out, capI, penalty)
         if out == o.typed && prevNew == nil { return .keep }
         // odd-looking non-words (iPhone, NASA, sooo, a name mid-sentence) are never changed by themselves: underline
         if forceNonWords && out != o.typed && isProtected(o.typed, out: out, typedOOV: o.typedOOV) { return flag }
         return .apply(out: out, prevNew: prevNew, merged: mg != nil)
+    }
+
+    /// standalone i -> I unless the style keeps text as typed (casual)
+    static func capIfOn(_ s: String, _ on: Bool, _ penalty: (String, String) -> Double) -> String {
+        on ? TypingCore.capIWords(s, penalty: penalty) : s
     }
 
     public enum Idle: Equatable { case none, apply, flag }

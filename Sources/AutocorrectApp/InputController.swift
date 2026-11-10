@@ -324,8 +324,10 @@ final class InputController {
             let o = WordOutcome(rr, typedOOV: !inLex)
             if case .apply = Policy.boundary(o, mode: settings.mode, hasPrev: h.job.prev != nil, prevOut: nil, userWord: false,
                                              penalty: { [engine] a, b in engine.user.penalty(a, b) },
-                                             nameLike: Policy.nameLike(h.job.typed, left: h.job.input.left)) {} else { r2 = nil }
+                                             nameLike: Policy.nameLike(h.job.typed, left: h.job.input.left),
+                                             capI: engine.effectiveStyle != "casual") {} else { r2 = nil }
         }
+        core.capI = engine.effectiveStyle != "casual"
         var evs: [CGEvent] = []
         let inj = core.resolve(h.job, r2)
         if let inj = inj {

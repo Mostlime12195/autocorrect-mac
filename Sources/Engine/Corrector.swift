@@ -81,11 +81,14 @@ public final class WordResult {
     public let ms: Double
     public let recheck: Recheck?
     public let merge: Merge?
+    /// new text for the previous word (re-check flip and/or formal punctuation), nil = unchanged
+    public let prevText: String?
 
     init(slot: Slot, scores: [Double], lm: [Double]?, chosen: Int, out: String, skipped: Bool, cheap: Bool, nScored: Int, nCands: Int,
-         ms: Double, recheck: Recheck? = nil, merge: Merge? = nil) {
+         ms: Double, recheck: Recheck? = nil, merge: Merge? = nil, prevText: String? = nil) {
         self.slot = slot; self.scores = scores; self.lm = lm; self.chosen = chosen; self.out = out; self.skipped = skipped
         self.cheap = cheap; self.nScored = nScored; self.nCands = nCands; self.ms = ms; self.recheck = recheck; self.merge = merge
+        self.prevText = prevText
     }
 
     /// chosen score minus the best other score (first pass)
@@ -116,8 +119,9 @@ public final class CorrectorStats {
     public var lmMsTotal = 0.0
 }
 
-/// Word-at-a-time corrector (port of Corrector.kt, standard style): the LM runs only at word end, only on the top-K
-/// cheap candidates, and not at all for confident exact hits; re-check of the previous word and merges as on Android.
+/// Word-at-a-time corrector (port of Corrector.kt): the LM runs only at word end, only on the top-K cheap candidates, and
+/// not at all for confident exact hits; re-check of the previous word and merges as on Android. The style is the
+/// scorer's control token plus the decode params; `formal` adds the formal style's capitals and commas (auto mode only).
 public final class Corrector {
     public let gen: CandidateGenerator
     public var gen2: CandidateGeneratorV2?
@@ -198,17 +202,21 @@ public final class Corrector {
     }
 
     /// Decide one finished word. scorer == nil -> cheap path. prev -> re-check pass for the previous word.
-    public func correctWord(_ w: WordInput, scorer: LmScorer?, params p: DecodeParams, prev: PrevWord?, merge: MergeInput? = nil) throws -> WordResult {
+    /// formal: the formal style's capitals (sentence start, i -> I) and a comma after the previous word;
+    /// autoCap false: never add sentence-start capitals.
+    public func correctWord(_ w: WordInput, scorer: LmScorer?, params p: DecodeParams, prev: PrevWord?, merge: MergeInput? = nil,
+                            formal: Bool = false, autoCap: Bool = true) throws -> WordResult {
         let t0 = Date()
         let full = candidates(w.typed, w.touches)
-        return try decideSlot(full, w, scorer, p, prev, merge, t0)
+        return try decideSlot(full, w, scorer, p, prev, merge, t0, formal: formal, autoCap: autoCap)
     }
 
     private func touchesOf(_ typed: String, _ t: [Touch]?) -> [Touch] { (t?.count == typed.count ? t : nil) ?? KeyGeom.keyTouches(typed) }
 
     private func ms(_ t0: Date) -> Double { Date().timeIntervalSince(t0) * 1000 }
 
-    func decideSlot(_ full: Slot, _ w: WordInput, _ scorer: LmScorer?, _ p: DecodeParams, _ prev: PrevWord?, _ merge: MergeInput?, _ t0: Date) throws -> WordResult {
+    func decideSlot(_ full: Slot, _ w: WordInput, _ scorer: LmScorer?, _ p: DecodeParams, _ prev: PrevWord?, _ merge: MergeInput?, _ t0: Date,
+                    formal: Bool = false, autoCap: Bool = true) throws -> WordResult {
         stats.words += 1
         let left = w.left, sep = w.sep
         if full.typedIdx < 0 && full.cands.isEmpty { return keep(full, t0) }
@@ -224,7 +232,8 @@ public final class Corrector {
                               nCands: full.cands.count, ms: ms(t0))
         }
         let mergePossible = merge != nil && prev != nil && sep == " " && gen2?.mergeOk(merge!.prevTyped, w.typed) == true
-        if !mergePossible && canSkip(full) {
+        // the formal style needs the LM at every word (capitals, punctuation after the previous word)
+        if !formal && !mergePossible && canSkip(full) {
             stats.lmSkipped += 1
             let sc = full.cands.indices.map { cheapScore(full, $0) }
             return WordResult(slot: full, scores: sc, lm: nil, chosen: full.typedIdx, out: full.cands[full.typedIdx], skipped: true, cheap: false,
@@ -247,7 +256,7 @@ public final class Corrector {
         if let prev = prev, let pm = p.margin {
             let prevConfident = prev.margin >= config.recheckSkipMargin && CONFUSIONS[prev.slot.cands[prev.idx].lowercased()] == nil &&
                 CONFUSIONS[prev.slot.typed.lowercased()] == nil
-            if !prevConfident && (prev.lmScored || !config.recheckOnlyIfScored || mergePossible) {
+            if !prevConfident && (prev.lmScored || !config.recheckOnlyIfScored || mergePossible || formal) {
                 let nxt = sep + s.cands[k]
                 let keepIdx = recheckSubset(prev)
                 let ps = prev.slot.subset(keepIdx)
@@ -284,11 +293,59 @@ public final class Corrector {
                 }
             }
         }
+        var out = s.cands[k]
+        var prevText: String? = recheck?.to
+        if formal {
+            // A2. capitals: sentence start, i -> I (pipeline.js decodeV2 with style)
+            if Self.isLower(String(out.prefix(1))) &&
+                ((autoCap && Self.sentStart(left + sep)) || Self.I_WORDS.contains(String(out.split(separator: " ", omittingEmptySubsequences: false)[0]))) {
+                let lc = try scorer.score([LmReq(left, sep + Self.cap1(out))])[0]
+                let kd = s.kind(k)
+                let v = s.sp[k] + p.lam * lc + (k == s.typedIdx ? p.bias : 0) - (kd != Kind.WORD ? (p.pen[kd] ?? 0) : 0) - (p.pen["caps"] ?? 0) -
+                    (u?.penalty(out, Self.cap1(out)) ?? 0)
+                if v > sc[k] { out = Self.cap1(out) }
+            }
+            // D. punctuation after the previous word
+            if let prev = prev, mergeOut == nil, !sep.isEmpty, sep.allSatisfy({ $0.isWhitespace }) {
+                let po = prevText ?? prev.slot.cands[prev.idx]
+                if let l = po.last, isLowerASCII(l) || isUpperASCII(l) {
+                    let pre = prev.sep + po
+                    let reqs = [LmReq(prev.left, pre + sep + out)] +
+                        Self.PUNCT.map { pc in LmReq(prev.left, pre + pc.0 + sep + (Self.SENT_END.contains(pc.0) && autoCap ? Self.cap1(out) : out)) }
+                    let lpp = try scorer.score(reqs)
+                    var best = p.lamRe * lpp[0]
+                    var bj = -1
+                    for (j, pc) in Self.PUNCT.enumerated() {
+                        let v = p.lamRe * lpp[1 + j] - (p.pen[pc.1] ?? 0) - (u?.penalty(po, po + pc.0) ?? 0)
+                        if v > best { best = v; bj = j }
+                    }
+                    if bj >= 0 {
+                        let pc = Self.PUNCT[bj].0
+                        prevText = po + pc
+                        if autoCap && Self.SENT_END.contains(pc) && Self.isLower(String(out.prefix(1))) { out = Self.cap1(out) }
+                    }
+                }
+            }
+        }
         stats.lmRuns += 1
         let dt = ms(t0)
         stats.lmMsTotal += dt
-        return WordResult(slot: s, scores: sc, lm: lp, chosen: k, out: s.cands[k], skipped: false, cheap: false, nScored: s.cands.count,
-                          nCands: full.cands.count, ms: dt, recheck: recheck, merge: mergeOut)
+        return WordResult(slot: s, scores: sc, lm: lp, chosen: k, out: out, skipped: false, cheap: false, nScored: s.cands.count,
+                          nCands: full.cands.count, ms: dt, recheck: recheck, merge: mergeOut, prevText: prevText)
+    }
+
+    static let SENT_END: Set<String> = [".", "?", "!"]
+    static let I_WORDS: Set<String> = ["i", "i'm", "i'll", "i'd", "i've"]
+    /// Punctuation the per-word pass may add after the previous word: only commas. One word of right context can't tell
+    /// a sentence end ("It does. My commas" for "It does my commas"); . ? ! belong to the pass after a pause (Rewind).
+    static let PUNCT: [(String, String)] = [(",", "comma")]
+    static func cap1(_ s: String) -> String { s.prefix(1).uppercased() + s.dropFirst() }
+    static func isLower(_ c: String) -> Bool { !c.isEmpty && c != c.uppercased() && c == c.lowercased() }
+    static func sentStart(_ text: String) -> Bool {
+        var t = Substring(text)
+        while let l = t.last, l == " " || l == "\t" { t = t.dropLast() }
+        guard let l = t.last else { return true }
+        return l == "." || l == "?" || l == "!" || l == "\n"
     }
 
     /// previous-word candidates worth re-checking: the current choice + those close to the first-pass best

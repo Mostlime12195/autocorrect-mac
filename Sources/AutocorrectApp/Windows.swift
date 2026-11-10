@@ -47,8 +47,24 @@ struct PermissionView: View {
 
 // MARK: settings
 
+enum SettingsTab: Hashable { case general, dictionary, performance, data }
+
 final class SettingsModel: ObservableObject {
+    @Published var tab = SettingsTab.general
     @Published var mode = Settings.shared.mode { didSet { Settings.shared.mode = mode; onChange?() } }
+    /// casual / standard / formal: applied right away (no restart)
+    @Published var style = Settings.shared.style {
+        didSet { guard style != oldValue else { return }; Settings.shared.style = style; onStyle?(style) }
+    }
+    /// the loaded model has style tokens (the picker is shown only then)
+    @Published var supportsStyle = false
+    var supportsStyleSource: (() -> Bool)?
+    var onStyle: ((String) -> Void)?
+    /// a model finished loading: show or hide the style picker
+    func refreshModel() {
+        let s = supportsStyleSource?() ?? false
+        if s != supportsStyle { supportsStyle = s }
+    }
     @Published var preview = Settings.shared.preview { didSet { Settings.shared.preview = preview } }
     @Published var checkUpdates = Settings.shared.checkUpdates { didSet { Settings.shared.checkUpdates = checkUpdates } }
     /// opt-in upload of word-level correction events; turning it off drops whatever is queued
@@ -85,6 +101,8 @@ final class SettingsModel: ObservableObject {
     private var timer: Timer?
     func reload() {
         if mode != Settings.shared.mode { mode = Settings.shared.mode }
+        if style != Settings.shared.style { style = Settings.shared.style }
+        refreshModel()
         if shareData != Settings.shared.shareData { shareData = Settings.shared.shareData }
         if shareContext != Settings.shared.shareContext { shareContext = Settings.shared.shareContext }
         systemAutocorrect = SystemAutocorrect.isOn
@@ -100,11 +118,46 @@ final class SettingsModel: ObservableObject {
     func stop() { timer?.invalidate(); timer = nil }
 }
 
+/// Settings in tabs (General, Dictionary, Performance, Data Sharing); every tab scrolls when the window is short.
 struct SettingsView: View {
     @ObservedObject var model: SettingsModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        TabView(selection: $model.tab) {
+            SettingsPage { GeneralSection(model: model) }
+                .tabItem { Text("General") }.tag(SettingsTab.general)
+            DictionarySection(model: model)
+                .padding(20)
+                .tabItem { Text("Dictionary") }.tag(SettingsTab.dictionary)
+            SettingsPage { PerformanceView(model: model) }
+                .tabItem { Text("Performance") }.tag(SettingsTab.performance)
+            SettingsPage { DataSharingSection(model: model) }
+                .tabItem { Text("Data Sharing") }.tag(SettingsTab.data)
+        }
+        .padding(12)
+        .frame(minWidth: 500, maxWidth: .infinity, minHeight: 340, maxHeight: .infinity)
+    }
+}
+
+/// one tab's content, top-aligned, scrolling when it doesn't fit
+struct SettingsPage<Content: View>: View {
+    let content: Content
+    init(@ViewBuilder content: () -> Content) { self.content = content() }
+
+    var body: some View {
+        ScrollView(.vertical) {
+            content
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(20)
+        }
+    }
+}
+
+struct GeneralSection: View {
+    @ObservedObject var model: SettingsModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
             Text("Keylime is a preview, released to show what it can do and to gather feedback and data. Expect rough edges.")
                 .font(.footnote).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
             VStack(alignment: .leading, spacing: 6) {
@@ -117,6 +170,7 @@ struct SettingsView: View {
                 Toggle("Preview a correction while typing (Space accepts, Esc cancels)", isOn: $model.preview)
                     .disabled(model.mode != .auto)
             }
+            if model.supportsStyle { StyleSection(model: model) }
             VStack(alignment: .leading, spacing: 6) {
                 Text("macOS autocorrect").font(.headline)
                 Text("“Correct spelling automatically” is \(model.systemAutocorrect ? "on" : "off").")
@@ -126,17 +180,35 @@ struct SettingsView: View {
                     set: { off in SystemAutocorrect.set(!off); model.systemAutocorrect = SystemAutocorrect.isOn }))
                 Text("Apps that are already open may need a restart to notice.").font(.footnote).foregroundColor(.secondary)
             }
-            DictionarySection(model: model)
-            PerformanceView(model: model)
-            DataSharingSection(model: model)
             VStack(alignment: .leading, spacing: 6) {
-                Text("Other").font(.headline)
+                Text("Updates").font(.headline)
                 Toggle("Check for updates automatically", isOn: $model.checkUpdates)
-                Button("Personal Dictionary & Excluded Apps…") { model.openLists?() }
             }
         }
-        .padding(20)
-        .frame(width: 520)
+    }
+}
+
+/// casual / standard / formal (Android's Style setting); shown only for models trained with style tokens
+struct StyleSection: View {
+    @ObservedObject var model: SettingsModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Style").font(.headline)
+            Picker("", selection: $model.style) {
+                ForEach(WritingStyle.all, id: \.self) { Text(WritingStyle.label($0)).tag($0) }
+            }.pickerStyle(.segmented).labelsHidden().frame(maxWidth: 320)
+            Text(Self.about(model.style))
+                .font(.footnote).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    static func about(_ s: String) -> String {
+        switch s {
+        case "casual": return "Fixes typos and leaves casual writing alone: “i” stays lowercase."
+        case "formal": return "Expects careful writing, such as apostrophes (dont → don't). When it fixes typos for you, it also adds capitals at the start of sentences, commas as you type, and full stops after a pause."
+        default: return "Fixes typos in the tone you type in, and writes “i” as “I”."
+        }
     }
 }
 
@@ -262,6 +334,7 @@ struct DictionarySection: View {
             Text("Never flagged or corrected. “Not a typo” adds a word here.").font(.footnote).foregroundColor(.secondary)
             if model.words.isEmpty {
                 Text("No words yet.").foregroundColor(.secondary).padding(.vertical, 4)
+                Spacer(minLength: 0)
             } else {
                 List {
                     ForEach(model.words, id: \.self) { w in
@@ -272,13 +345,18 @@ struct DictionarySection: View {
                         }
                     }
                 }
-                .frame(height: min(150, CGFloat(model.words.count) * 26 + 12))
+                .frame(minHeight: 120, maxHeight: .infinity)
             }
             HStack {
                 TextField("Add a word", text: $newWord).onSubmit(add)
                 Button("Add", action: add).disabled(newWord.trimmingCharacters(in: .whitespaces).isEmpty)
             }
+            Divider().padding(.vertical, 6)
+            Text("Excluded apps").font(.headline)
+            Text("No corrections in terminals, code editors, password managers and any app you add.").font(.footnote).foregroundColor(.secondary)
+            Button("Personal Dictionary & Excluded Apps…") { model.openLists?() }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private func add() {
@@ -396,6 +474,24 @@ struct ListsView: View {
         newApp = ""
         model.reload()
     }
+}
+
+/// The Settings window: 580 x 600 points of content, less on a screen too short for that (each tab scrolls), resizable.
+func makeSettingsWindow<V: View>(_ view: V) -> NSWindow {
+    let vis = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame.size ?? NSSize(width: 1440, height: 875)
+    // title bar ~28 points; keep a little room above and below
+    let h = max(340, min(600, vis.height - 28 - 40))
+    let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 580, height: h), styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                     backing: .buffered, defer: false)
+    w.title = "Keylime Settings"
+    let host = NSHostingView(rootView: view)
+    // the window keeps its size; SwiftUI only sets the minimum (the tabs scroll instead of growing the window)
+    host.sizingOptions = [.minSize]
+    w.contentView = host
+    w.contentMinSize = NSSize(width: 500, height: 340)
+    w.isReleasedWhenClosed = false
+    w.center()
+    return w
 }
 
 func makeWindow<V: View>(_ title: String, _ view: V) -> NSWindow {

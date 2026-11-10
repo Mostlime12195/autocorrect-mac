@@ -32,7 +32,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let sup = Settings.supportDir
         user = UserData(dict: sup.appendingPathComponent("dictionary.txt"), learn: sup.appendingPathComponent("learned.tsv"))
         engine = EngineHost(user: user)
-        engine.onChange = { [weak self] in self?.refreshIcon() }
+        engine.setStyle(settings.style)
+        engine.onChange = { [weak self] in self?.refreshIcon(); self?.settingsModel.refreshModel() }
         if let lex = Bundle.main.url(forResource: "lexicon", withExtension: "tsv") {
             engine.start(lexicon: lex)
         } else {
@@ -53,6 +54,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settingsModel.openUploadPreview = { [weak self] in self?.openUploadPreview() }
         settingsModel.usageSource = { [weak self] in self?.layer.usage() ?? "" }
         settingsModel.user = user
+        settingsModel.supportsStyleSource = { [weak self] in self?.engine.supportsStyle ?? false }
+        settingsModel.onStyle = { [weak self] s in self?.engine.setStyle(s) }
         let applyPerf: (Settings.Perf) -> Void = { [weak self] p in
             TypingCore.CTX_CHARS = p.leftChars
             self?.engine.setContext(p.ctxTokens)
@@ -268,6 +271,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let tap = input.tapRunning ? "running" : "NOT running"
         return "Keylime \(Updater.currentVersion) (preview) on macOS \(ProcessInfo.processInfo.operatingSystemVersionString)\n" +
             "Event tap: \(tap); engine: \(engine.status); keyboard: \(input.layoutName)\n" +
+            "Style: \(settings.style)" + (engine.supportsStyle ? "" : " (the model has no style tokens: standard)") + "\n" +
             "System autocorrect: \(SystemAutocorrect.isOn ? "on" : "off")\n" +
             layer.diagnostics() + "\n" + layer.usage() + "\n" + overlay.diagnostics() + "\n\nRecent events:\n" + log
     }
@@ -307,7 +311,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func openSettings() {
         if settingsWindow == nil {
-            settingsWindow = makeWindow("Keylime Settings", SettingsView(model: settingsModel))
+            settingsWindow = makeSettingsWindow(SettingsView(model: settingsModel))
             NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: settingsWindow, queue: .main) {
                 [weak self] _ in self?.settingsModel.stop()
             }

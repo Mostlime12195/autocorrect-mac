@@ -103,6 +103,9 @@ final class TextLayer {
     /// "Ignore" this session
     private var ignored = Set<String>()
     private var sentenceCache: [String: [(SentenceFix, Bool)]] = [:]
+    /// formal punctuation spots already proposed (their text around them), oldest first
+    private var punctTried = Set<String>()
+    private var punctTriedOrder: [String] = []
     private var cacheOrder: [String] = []
     private var idleWork: DispatchWorkItem?
     private var previewWork: DispatchWorkItem?
@@ -554,7 +557,8 @@ final class TextLayer {
         let o = WordOutcome(r, typedOOV: !inLex)
         let userWord = engine.user.has(word) || ignored.contains(word.lowercased())
         let d = Policy.boundary(o, mode: settings.mode, hasPrev: used != nil, prevOut: used?.out, userWord: userWord,
-                                penalty: { [engine] a, b in engine.user.penalty(a, b) }, nameLike: nameLike)
+                                penalty: { [engine] a, b in engine.user.penalty(a, b) }, nameLike: nameLike,
+                                capI: engine.effectiveStyle != "casual")
         func setPrev(_ out: String, _ at: Int) {
             if sep == "\n" { prev = nil; return }
             prev = PrevInfo(slot: r.slot, idx: r.chosen, out: out, typed: word, lmScored: r.lmScored, margin: r.lmScored ? r.margin : 0,
@@ -862,7 +866,7 @@ final class TextLayer {
                 guard let self = self, let r = r, self.seqNow == seq, f.same(self.field) else { return }
                 let d = Policy.boundary(WordOutcome(r, typedOOV: !inLex), mode: .auto, hasPrev: false, prevOut: nil, userWord: false,
                                         penalty: { [engine = self.engine] x, y in engine.user.penalty(x, y) },
-                                        nameLike: Policy.nameLike(word, left: left))
+                                        nameLike: Policy.nameLike(word, left: left), capI: self.engine.effectiveStyle != "casual")
                 guard case .apply(let out, nil, false) = d, out.lowercased() != word.lowercased(),
                       let rect = f.bounds(NSRange(location: a, length: (word as NSString).length)) else { return }
                 self.preview = Preview(start: a, word: word, out: out)
@@ -983,9 +987,76 @@ final class TextLayer {
                     })
                 }
                 self.pushOverlay()
+                // formal style, auto mode: commas and full stops after the pause (only when no other fix is being written)
+                if !typing && applies.isEmpty && self.settings.mode == .auto && self.engine.effectiveStyle == "formal" {
+                    self.formalPunct(f, snap, seq)
+                }
                 if more && !typing { self.scheduleIdle(seq) }
             }
         }
+    }
+
+    /// Formal style, after a pause (Android KeyboardController.idleRewind): a comma after a word, or a sentence end, in the
+    /// line before the caret, scored on everything typed after it; written only when the model is very sure
+    /// (Rewind.MARGIN). Each spot is proposed once.
+    private func formalPunct(_ f: AXField, _ snap: AXField.Snapshot, _ seq: Int) {
+        let caretRel = snap.caret - snap.base
+        guard caretRel > 0, caretRel <= snap.ns.length else { return }
+        var end = caretRel
+        // the word at the caret is still being typed: not part of it
+        while end > 0, MarkTracker.isWordUnit(snap.ns.character(at: end - 1)) { end -= 1 }
+        var a = max(0, end - settings.perf.leftChars - Self.IDLE_CHARS)
+        if a > 0 { a = snap.ns.rangeOfComposedCharacterSequence(at: a).location }
+        guard end > a else { return }
+        let text = snap.ns.substring(with: NSRange(location: a, length: end - a))
+        let chars = Array(text)
+        var offs: [Int] = []
+        offs.reserveCapacity(chars.count + 1)
+        var u = 0
+        for c in chars { offs.append(u); u += c.utf16.count }
+        offs.append(u)
+        func key(_ start: Int, _ word: String) -> String {
+            String(chars[max(0, start - 40)..<min(chars.count, start + word.count + 1)])
+        }
+        let targets = Rewind.targets(text, tried: { [punctTried] s, w in punctTried.contains(key(s, w)) })
+            .filter { !engine.user.has($0.word) && !ignored.contains($0.word.lowercased()) }
+        guard !targets.isEmpty else { return }
+        let t0 = Date()
+        engine.checkPunct(targets, cancelled: { [weak self] in self?.seqNow != seq }) { [weak self] res in
+            self?.q.async {
+                guard let self = self, let res = res else { return }
+                for t in targets { self.markPunctTried(key(t.start, t.word)) }
+                let changes = Rewind.nonOverlapping(res)
+                self.noteIdle("formal punctuation: \(targets.count) spot(s) in \(Int(Date().timeIntervalSince(t0) * 1000)) ms, \(changes.count) change(s)")
+                guard !changes.isEmpty, self.seqNow == seq, f.same(self.field), let s2 = f.snapshot(),
+                      s2.base == snap.base, s2.caret == snap.caret, s2.text == snap.text else { return }
+                // right to left so earlier offsets hold
+                for c in changes.sorted(by: { $0.start > $1.start }) {
+                    guard self.seqNow == seq else { break }
+                    let range = NSRange(location: snap.base + a + offs[c.start], length: (c.from as NSString).length)
+                    self.fix(PendingFix(f: f, range: range, old: c.from, new: c.to, made: Date()) { [weak self] r, at in
+                        guard let self = self else { return }
+                        self.noteIdle("formal punctuation \"\(c.from)\" -> \"\(c.to)\": write \(r)")
+                        if r == .unsupported { self.writesFailed(f); return }
+                        guard r == .ok else { return }
+                        let newLen = (c.to as NSString).length
+                        self.edited(at: at, oldLen: range.length, newLen: newLen)
+                        let pid = self.addPill(NSRange(location: at, length: newLen), c.to)
+                        // undoable like any fix (undo teaches "not here"), never uploaded: punctuation isn't a typo
+                        self.recents.append(Recent(start: at, newText: c.to, oldText: c.from, word: c.from, learnTyped: c.from,
+                                                   out: c.to, sep: "", pillId: pid, until: Date().addingTimeInterval(Self.REVERT_SECS),
+                                                   reported: true))
+                        if self.recents.count > 6 { self.reportKept(self.recents.removeFirst()) }
+                        self.pushOverlay()
+                    })
+                }
+            }
+        }
+    }
+
+    private func markPunctTried(_ k: String) {
+        if punctTried.insert(k).inserted { punctTriedOrder.append(k) }
+        if punctTriedOrder.count > 500 { punctTried.remove(punctTriedOrder.removeFirst()) }
     }
 
     private func dist(_ r: Range<Int>, _ c: Int) -> Int { c < r.lowerBound ? r.lowerBound - c : (c > r.upperBound ? c - r.upperBound : 0) }

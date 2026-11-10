@@ -52,9 +52,17 @@ final class DecoderParityTests: XCTestCase {
     }
 
     /// m2s int4 (MatMulNBits, the default model) with the standard style token: Python decode on the same .ort graph.
-    func testM2sInt4MatchesPython() throws {
+    func testM2sInt4MatchesPython() throws { try m2sStyle("pipeline_m2s.json", "standard", 250) }
+
+    /// the same messages with the casual and formal style tokens (scripts/make_fixtures.py ... 12 <style>)
+    func testM2sCasualMatchesPython() throws { try m2sStyle("pipeline_m2s_casual.json", "casual", 249) }
+    func testM2sFormalMatchesPython() throws { try m2sStyle("pipeline_m2s_formal.json", "formal", 251) }
+
+    private func m2sStyle(_ fixture: String, _ style: String, _ token: Int) throws {
         let path = try Fixtures.modelPath("m2s.step.int4m.ort")
-        let ref = Fixtures.json("pipeline_m2s.json") as! [String: Any]
+        let ref = Fixtures.json(fixture) as! [String: Any]
+        XCTAssertEqual(ref["style"] as? String, style)
+        XCTAssertEqual((ref["style_id"] as! NSNumber).intValue, token)
         let m = ref["meta"] as! [String: Any]
         let meta = StepMeta(nKvHeads: (m["n_kv_heads"] as! NSNumber).intValue, headDim: (m["head_dim"] as! NSNumber).intValue,
                             convKernel: (m["conv_kernel"] as! NSNumber).intValue, dModel: (m["d_model"] as! NSNumber).intValue,
@@ -63,7 +71,7 @@ final class DecoderParityTests: XCTestCase {
         defer { step.close() }
         let exp = ref["outs"] as! [[String]]
         let (words, same) = try run(Fixtures.messages(Fixtures.pipelineRef), exp, step, Fixtures.tokM2,
-                                    params(ref["params"] as! [String: Any]), style: (ref["style_id"] as! NSNumber).intValue, label: "m2s int4")
+                                    params(ref["params"] as! [String: Any]), style: token, label: "m2s int4 \(style)")
         XCTAssertGreaterThan(words, 300)
         XCTAssertLessThanOrEqual((words - same) * 100, words, "too many word differences: \(words - same)/\(words)")
     }

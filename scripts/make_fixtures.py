@@ -3,10 +3,12 @@
 The block4 reference outputs and candidate / tokenizer cases come from the Android engine's fixtures (made by
 autocorrect/android_export/make_fixtures.py). This adds m2s: the same 50 messages (same precomputed candidate slots),
 corrector.decode() (system e: first pass + re-check of the previous word) with the m2s.step.int4m.ort graph and the
-standard style token, exactly like the Kotlin / Swift NeuralScorer: context = [EOS, STYLE] + last 62 tokens.
+style token (standard by default), exactly like the Kotlin / Swift NeuralScorer: context = [EOS, STYLE] + last 62 tokens.
 
   ~/projects/autocorrect/.venv/bin/python -I scripts/make_fixtures.py \
-      ~/projects/autocorrect/android_export/out/publish Tests/EngineTests/Fixtures
+      ~/projects/autocorrect/android_export/out/publish Tests/EngineTests/Fixtures [messages] [style]
+
+standard -> pipeline_m2s.json; casual / formal -> pipeline_m2s_<style>.json (same messages, that style's token and params).
 """
 import json, os, sys, time
 from collections import OrderedDict
@@ -21,10 +23,12 @@ from corrector import decode
 
 pub, out = sys.argv[1], sys.argv[2]
 N = int(sys.argv[3]) if len(sys.argv) > 3 else 50   # messages (CPU time on a small box: ~1-2 s per LM call)
+STYLE_NAME = sys.argv[4] if len(sys.argv) > 4 else 'standard'
+OUT_NAME = 'pipeline_m2s.json' if STYLE_NAME == 'standard' else f'pipeline_m2s_{STYLE_NAME}.json'
 man = json.load(open(f'{pub}/manifest.json'))
 spec = next(m for m in man['models'] if m['id'] == 'm2s_int4')
-STYLE = spec['style_tokens']['standard']
-p = spec['style_params'].get('standard', spec['params'])
+STYLE = spec['style_tokens'][STYLE_NAME]
+p = spec['style_params'].get(STYLE_NAME, spec['params'])
 MAX_CTX = 64
 
 
@@ -81,9 +85,9 @@ outs = []
 
 
 def save():
-    res = dict(model='m2s_int4', graph=spec['graph'], style='standard', style_id=STYLE, meta=spec['meta'],
+    res = dict(model='m2s_int4', graph=spec['graph'], style=STYLE_NAME, style_id=STYLE, meta=spec['meta'],
                params=dict(lam=p['lam'], bias=p['bias'], margin=p.get('margin'), lam_r=p.get('lam_r')), outs=outs)
-    with open(f'{out}/pipeline_m2s.json', 'w') as f: json.dump(res, f)
+    with open(f'{out}/{OUT_NAME}', 'w') as f: json.dump(res, f)
 
 
 for i, m in enumerate(msgs):

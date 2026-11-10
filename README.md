@@ -34,6 +34,9 @@ grant: every build is signed with the same certificate.
   that came after it.
 - Click an underlined word: up to 3 fixes, **Ignore**, **Add to Dictionary**.
 - Optional: a preview bubble with the fix the current word is about to get (Space accepts, Esc cancels).
+- **Style** (Settings → General, m2 only): Casual, Standard or Formal. Casual keeps "i" in lowercase. Formal adds
+  capitals at the start of a sentence and commas while you type. It also adds full stops after a pause. Formal changes
+  the text only in the "Fix confident typos" mode. A new style starts to work immediately.
 - Settings can turn off macOS's own "Correct spelling automatically" so the two don't fight (open apps may need a
   restart).
 - Menu: mode, pause in the current app, model (m2 106M int4 default, m1 34M lighter), personal dictionary and excluded

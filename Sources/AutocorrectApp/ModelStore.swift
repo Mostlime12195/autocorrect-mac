@@ -20,12 +20,18 @@ struct ModelSpec {
     let supportsStyle: Bool
     let styleTokens: [String: Int]
     let styleParams: [String: DecodeParams]
+    /// cand-gen v2 kind penalties for the formal style (params.pen_formal: adds caps / punct / comma); params.pen is the
+    /// other styles'
+    let penFormal: [String: Double]
     /// this model's own mirrors (its Hugging Face repo, then Nest), tried before the manifest's top-level base_urls
     let baseUrls: [String]
 
-    /// standard style: its control token (style models only) and its decode params
-    var styleToken: Int? { supportsStyle ? styleTokens["standard"] : nil }
-    var standardParams: DecodeParams { supportsStyle ? (styleParams["standard"] ?? params) : params }
+    /// a style's control token (style models only; nil = untagged context)
+    func styleToken(_ style: String) -> Int? { WritingStyle.token(style, supportsStyle: supportsStyle, tokens: styleTokens) }
+    /// a style's decode params (Style.params, as Android ModelSpec.paramsFor)
+    func paramsFor(_ style: String) -> DecodeParams {
+        WritingStyle.params(style, supportsStyle: supportsStyle, params: params, styleParams: styleParams, penFormal: penFormal)
+    }
 }
 
 struct Manifest {
@@ -60,6 +66,7 @@ struct Manifest {
                 supportsStyle: m["supports_style"] as? Bool ?? false,
                 styleTokens: (m["style_tokens"] as? [String: Any])?.compactMapValues { ($0 as? NSNumber)?.intValue } ?? [:],
                 styleParams: (m["style_params"] as? [String: Any])?.compactMapValues { ($0 as? [String: Any]).map(DecodeParams.from(json:)) } ?? [:],
+                penFormal: WritingStyle.penFormal(m),
                 baseUrls: ModelMirrors.baseUrls(m)))
         }
         if models.isEmpty { throw StoreError.badManifest }

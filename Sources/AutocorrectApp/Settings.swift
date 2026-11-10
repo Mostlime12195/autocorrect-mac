@@ -41,6 +41,12 @@ final class Settings {
 
     var enabled: Bool { mode != .off }
 
+    /// casual / standard / formal (WritingStyle); only style models use it
+    var style: String {
+        get { WritingStyle.stored(d.string(forKey: "style")) }
+        set { d.set(WritingStyle.stored(newValue), forKey: "style") }
+    }
+
     /// a bubble with the correction the current word is about to get (Space accepts, Esc cancels)
     var preview: Bool {
         get { d.bool(forKey: "preview") }
