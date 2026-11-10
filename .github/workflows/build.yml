@@ -28,7 +28,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: models
-          key: models-style1-v1
+          key: models-hf-v1
       - name: Models for the parity tests
         run: scripts/fetch_models.sh models
       - name: Unit and parity tests

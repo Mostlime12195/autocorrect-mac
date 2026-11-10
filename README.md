@@ -18,7 +18,7 @@ Apple Silicon only, macOS 13+.
    `xattr -dr com.apple.quarantine /Applications/Keylime.app` and open it normally.
 4. Grant **Accessibility** when asked (System Settings → Privacy & Security → Accessibility). Remove an old
    "Autocorrect" entry if there is one. The setup window closes by itself once it's on.
-5. The model downloads on first run (about 79 MB for m2, 42 MB for m1).
+5. The model downloads on first run from Hugging Face (about 79 MB for m2, 42 MB for m1).
 
 From 0.2.0 on, updates install themselves (menu → Check for Updates…, or the daily check) and keep the Accessibility
 grant: every build is signed with the same certificate.
@@ -58,4 +58,4 @@ requirement is certificate-based, self-tests the bundle and attaches the zip to 
 
 ## License
 
-Code: MIT (see `LICENSE`). Model weights in [keylime-models](https://github.com/Mostlime12195/keylime-models): CC BY 4.0.
+Code: MIT (see `LICENSE`). Model weights on Hugging Face ([keylime-m2](https://huggingface.co/MostLime/keylime-m2), [keylime-m1](https://huggingface.co/MostLime/keylime-m1)): CC BY 4.0.

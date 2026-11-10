@@ -1,6 +1,7 @@
 import CryptoKit
 import Engine
 import Foundation
+import KeylimeCore
 
 struct ModelFile {
     let file: String
@@ -19,6 +20,8 @@ struct ModelSpec {
     let supportsStyle: Bool
     let styleTokens: [String: Int]
     let styleParams: [String: DecodeParams]
+    /// this model's own mirrors (its Hugging Face repo, then Nest), tried before the manifest's top-level base_urls
+    let baseUrls: [String]
 
     /// standard style: its control token (style models only) and its decode params
     var styleToken: Int? { supportsStyle ? styleTokens["standard"] : nil }
@@ -56,7 +59,8 @@ struct Manifest {
                 params: (m["params"] as? [String: Any]).map(DecodeParams.from(json:)) ?? .fallback,
                 supportsStyle: m["supports_style"] as? Bool ?? false,
                 styleTokens: (m["style_tokens"] as? [String: Any])?.compactMapValues { ($0 as? NSNumber)?.intValue } ?? [:],
-                styleParams: (m["style_params"] as? [String: Any])?.compactMapValues { ($0 as? [String: Any]).map(DecodeParams.from(json:)) } ?? [:]))
+                styleParams: (m["style_params"] as? [String: Any])?.compactMapValues { ($0 as? [String: Any]).map(DecodeParams.from(json:)) } ?? [:],
+                baseUrls: ModelMirrors.baseUrls(m)))
         }
         if models.isEmpty { throw StoreError.badManifest }
         return Manifest(updated: o["updated"] as? String ?? "", baseUrls: o["base_urls"] as? [String] ?? [(o["base_url"] as? String) ?? ""],
@@ -75,17 +79,10 @@ enum StoreError: Error, CustomStringConvertible {
     }
 }
 
-/// Model files in ~/Library/Application Support/Autocorrect/models, downloaded from the manifest's base URLs
-/// (GitHub release first, the Nest mirror second) and checked against the manifest's sha256.
+/// Model files in ~/Library/Application Support/Autocorrect/models, downloaded from the model's own base URLs
+/// (Hugging Face, then Nest), then the manifest's shared ones (ModelMirrors), and checked against the manifest's sha256.
 final class ModelStore {
-    static let manifestUrls = [
-        "https://github.com/Mostlime12195/keylime-models/releases/download/models-v1/manifest.json",
-        "https://autocorrect.mostlime.hackclub.app/autocorrect-android/manifest.json",
-    ]
-    static let fallbackBases = [
-        "https://github.com/Mostlime12195/keylime-models/releases/download/models-style1/",
-        "https://autocorrect.mostlime.hackclub.app/autocorrect-android/",
-    ]
+    static let manifestUrls = ModelMirrors.manifestUrls
 
     let dir: URL
     private(set) var manifest: Manifest?
@@ -114,7 +111,7 @@ final class ModelStore {
 
     func isInstalled(_ s: ModelSpec) -> Bool { isInstalled(s.graph) && isInstalled(s.vocab) }
 
-    /// Fetch the manifest (GitHub, then Nest); keeps the cached one when both fail.
+    /// Fetch the manifest (Nest, then GitHub); keeps the cached one when both fail.
     func refreshManifest() async -> Manifest? {
         for u in Self.manifestUrls {
             guard let url = URL(string: u) else { continue }
@@ -138,7 +135,7 @@ final class ModelStore {
         for f in files {
             var lastErr: Error = StoreError.download("no mirror")
             var ok = false
-            for base in (manifest?.baseUrls ?? []) + Self.fallbackBases where !ok {
+            for base in ModelMirrors.order(model: s.baseUrls, top: manifest?.baseUrls ?? []) where !ok {
                 guard let src = URL(string: base + f.file) else { continue }
                 do {
                     try await fetch(src, f) { frac in progress((done + frac * Double(max(f.size, 1))) / max(total, 1)) }
