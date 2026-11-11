@@ -150,6 +150,10 @@ public final class StepModel {
     /// timing counters
     public var runs = 0
     public var ortSeconds = 0.0
+    /// Rows per run that keep scores bit-identical to one big batch. The int4 (MatMulNBits) graphs take fp32
+    /// activations, so rows are independent. The int8 graphs quantize activations dynamically with one scale per call,
+    /// so a row's score depends on the rest of the batch: those run whole, as before.
+    public var rowLimit = Int.max
 
     public init(session: OrtSessionHandle, meta: StepMeta) {
         self.session = session; self.meta = meta
@@ -157,7 +161,9 @@ public final class StepModel {
 
     public static func open(path: String, meta: StepMeta, threads: Int = 4) throws -> StepModel {
         let s = try OrtSessionHandle(path: path, threads: threads, ortFormat: path.hasSuffix(".ort"))
-        return StepModel(session: s, meta: meta)
+        let m = StepModel(session: s, meta: meta)
+        if path.contains("int4") { m.rowLimit = 32 }
+        return m
     }
 
     /// Tree graph (one row of tokens laid out as a token tree, android_export/tree_graph.py): not wired up yet, the
@@ -238,8 +244,8 @@ public final class NeuralScorer: LmScorer {
     public let tok: SPTokenizer
     public let step: StepModel
     public var styleId: Int?
-    /// most candidate rows per ORT run (peak memory grows with the batch; results don't depend on it)
-    public var maxRows = 32
+    /// most candidate rows per ORT run (peak memory grows with the batch); defaults to the graph's own limit
+    public lazy var maxRows: Int = step.rowLimit
     private let cacheSize: Int
     private var cache: [String: ([Int], LmState)] = [:]
     private var cacheOrder: [String] = []   // LRU, oldest first
