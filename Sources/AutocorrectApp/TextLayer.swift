@@ -228,6 +228,8 @@ final class TextLayer {
             if name == (kAXFocusedUIElementChangedNotification as String) {
                 self.probe(force: true)
             } else {
+                // the text caught up: a word end waiting for its word looks again now
+                if name == (kAXValueChangedNotification as String) && !self.wordEnds.isEmpty { self.drainWordEnds() }
                 self.scheduleRefresh(after: 0.03)
             }
         }
@@ -240,18 +242,26 @@ final class TextLayer {
         switch s {
         case .boundary(let w, let sep):
             closePopover()
-            boundary(w, sep, seq)
+            wordEnds.append(WordEnd(word: w, sep: sep, seq: seq, at: Date()))
+            drainWordEnds()
         case .char:
             closePopover()
             schedulePreview(seq)
         case .reset:
+            // the caret moved: word ends still waiting get one last look, and the next word starts anywhere
+            if !wordEnds.isEmpty { drainWordEnds(final: true) }
+            lastWordEnd = nil
             if let p = click {
                 clicked(p)
                 q.asyncAfter(deadline: .now() + 0.06) { self.probe(force: true) }
             } else {
                 closePopover()
             }
-        case .backspace, .other:
+        case .backspace:
+            // the user may be retyping the last word: it can start anywhere again
+            lastWordEnd = nil
+            closePopover()
+        case .other:
             closePopover()
         }
         if mode != .ax && click == nil { probe(force: false) }
@@ -425,6 +435,8 @@ final class TextLayer {
         }
         reportKept(all: true)
         tracker.removeAll(); pills.removeAll(); recents.removeAll(); prev = nil; keepOnce = nil; rectCache.removeAll()
+        if !wordEnds.isEmpty { input.debugNote("ax: \(wordEnds.count) word end(s) dropped: the field changed") }
+        wordEnds.removeAll(); wordWait?.cancel(); wordWait = nil; lastWordEnd = nil
         if let f = f, let p = parked, CFEqual(p.el, f.el) {
             tracker.restore(p.marks)
             parked = nil
@@ -468,28 +480,6 @@ final class TextLayer {
         return f
     }
 
-    /// the whole-word occurrence of `word` closest before the caret (its separator may not have landed yet, and a few
-    /// more keys may have)
-    private func locate(_ word: String, _ s: AXField.Snapshot) -> Int? {
-        let w = Array(word.utf16)
-        let caret = s.caret - s.base
-        var i = caret - w.count
-        let lowest = max(0, caret - w.count - 24)
-        while i >= lowest {
-            if wholeWord(w, s, i) { return s.base + i }
-            i -= 1
-        }
-        return nil
-    }
-
-    private func wholeWord(_ w: [UInt16], _ s: AXField.Snapshot, _ i: Int) -> Bool {
-        guard i >= 0, i + w.count <= s.ns.length else { return false }
-        for k in 0..<w.count where s.ns.character(at: i + k) != w[k] { return false }
-        if i > 0 && MarkTracker.isWordUnit(s.ns.character(at: i - 1)) { return false }
-        if i + w.count < s.ns.length && MarkTracker.isWordUnit(s.ns.character(at: i + w.count)) { return false }
-        return true
-    }
-
     /// text before an absolute offset (at most n UTF-16 units)
     private func textBefore(_ s: AXField.Snapshot, _ at: Int, _ n: Int) -> String {
         let a = max(s.base, at - n)
@@ -510,26 +500,68 @@ final class TextLayer {
 
     // MARK: (b) word end
 
-    private func boundary(_ word: String, _ sep: String, _ seq: Int) {
-        if field == nil || mode == .unknown { probe(force: true) }
-        guard TypingCore.correctable(word) else { prev = nil; return }
-        guard let f = usableField() else { prev = nil; noteWord("skipped: \(notUsableWhy())"); return }
-        guard var snap = f.snapshot(), snap.selLength == 0 else { prev = nil; noteWord("skipped: field text unreadable or a selection"); return }
-        var found = locate(word, snap)
-        // Chromium / Electron update their accessibility text a little after the key
-        for _ in 0..<5 where found == nil {
-            usleep(40_000)
-            guard let s2 = f.snapshot(), s2.selLength == 0 else { break }
-            snap = s2
-            found = locate(word, s2)
+    /// A word end, waiting its turn: word ends are handled in order, each once its word is in the field's text.
+    private struct WordEnd { let word: String; let sep: String; let seq: Int; let at: Date }
+    private var wordEnds: [WordEnd] = []
+    private var wordWait: DispatchWorkItem?
+    /// a word end's correction is running (its result sets `prev`, the next word's context): since when
+    private var inFlight: Date?
+    /// where the last located word ended (absolute): the next word end's word can't start before it
+    private var lastWordEnd: Int?
+
+    /// Handle waiting word ends in order. The first one whose word isn't in the field yet (Electron's AX text lags the
+    /// keys) holds the ones after it until its word shows up (a value-changed notification or a poll) or
+    /// WordFinder.WAIT passes; nothing blocks the queue meanwhile. final: no more waiting (the caret moved).
+    private func drainWordEnds(final: Bool = false) {
+        wordWait?.cancel(); wordWait = nil
+        while let w = wordEnds.first {
+            // the previous word's result is the context (and merge partner) for this one: let it land first
+            if let t = inFlight, !final, Date().timeIntervalSince(t) < WordFinder.PREV_WAIT { scheduleWordRetry(); return }
+            if !boundary(w, final: final) { scheduleWordRetry(); return }
+            wordEnds.removeFirst()
         }
-        guard let start = found else { prev = nil; noteWord("skipped: the word isn't in the field text before the caret"); return }
-        if let k = keepOnce, k.start == start, k.word == word { keepOnce = nil; prev = nil; return }
+    }
+
+    private func scheduleWordRetry() {
+        let item = DispatchWorkItem { [weak self] in self?.drainWordEnds() }
+        wordWait = item
+        q.asyncAfter(deadline: .now() + WordFinder.POLL, execute: item)
+    }
+
+    /// one word end; -> false: its word isn't in the field yet, try again later (prev is kept meanwhile)
+    private func boundary(_ we: WordEnd, final: Bool) -> Bool {
+        let word = we.word, sep = we.sep, seq = we.seq
+        if field == nil || mode == .unknown { probe(force: true) }
+        guard TypingCore.correctable(word) else { prev = nil; return true }
+        guard let f = usableField() else { prev = nil; noteWord("skipped: \(notUsableWhy())"); return true }
+        let snap0 = f.snapshot()
+        if let s = snap0, s.selLength > 0 { prev = nil; noteWord("skipped: text is selected"); return true }
+        let waited = Date().timeIntervalSince(we.at)
+        let found = snap0.flatMap {
+            WordFinder.locate(word, text: $0.ns, base: $0.base, caret: $0.caret, typedSince: seqNow - seq, notBefore: lastWordEnd)
+        }
+        let start: Int
+        switch WordFinder.step(found: found, waited: waited, final: final) {
+        case .wait:
+            return false
+        case .skip:
+            prev = nil
+            let why = snap0 == nil ? "the field text was unreadable" : "the word isn't in the field text before the caret"
+            noteWord("skipped after \(Int(waited * 1000)) ms: \(why)\(final ? " (the caret moved)" : "")")
+            log.notice("word end skipped after \(Int(waited * 1000)) ms: \(why, privacy: .public) app \(self.bundle(f.pid), privacy: .public)")
+            return true
+        case .found(let s):
+            start = s
+        }
+        guard let snap = snap0 else { return true }
+        if waited >= 0.1 { input.debugNote("ax: word end: the word showed up after \(Int(waited * 1000)) ms") }
+        lastWordEnd = start + (word as NSString).length
+        if let k = keepOnce, k.start == start, k.word == word { keepOnce = nil; prev = nil; return true }
         guard start == 0 || TypingCore.isOpener(charBefore(snap, start)) else {
-            prev = nil; noteWord("skipped: the word follows \(charBefore(snap, start).map { "U+" + String($0.unicodeScalars.first!.value, radix: 16, uppercase: true) } ?? "?"), not a space"); return
+            prev = nil; noteWord("skipped: the word follows \(charBefore(snap, start).map { "U+" + String($0.unicodeScalars.first!.value, radix: 16, uppercase: true) } ?? "?"), not a space"); return true
         }
         let (left, sp) = TypingCore.splitLeft(leftText(snap, start))
-        let input = WordInput(typed: word, left: left, sep: sp)
+        let wi = WordInput(typed: word, left: left, sep: sp)
         var pw: PrevWord? = nil
         var merge: MergeInput? = nil
         var used: PrevInfo? = nil
@@ -542,8 +574,14 @@ final class TextLayer {
         }
         prev = nil
         let nameLike = Policy.nameLike(word, left: left)
-        engine.correctWord(input, prev: pw, merge: merge) { [weak self] r, inLex in
-            self?.q.async { self?.resolved(f, word, sep, start, seq, r, inLex, used, nameLike) }
+        inFlight = Date()
+        engine.correctWord(wi, prev: pw, merge: merge) { [weak self] r, inLex in
+            self?.q.async {
+                guard let self = self else { return }
+                self.inFlight = nil
+                self.resolved(f, word, sep, start, seq, r, inLex, used, nameLike)
+                if !self.wordEnds.isEmpty { self.drainWordEnds() }
+            }
         }
         // Performance: also re-check the sentence every N words (queued after this word's own correction)
         let n = settings.perf.everyWords
@@ -551,6 +589,7 @@ final class TextLayer {
             wordsSincePass += 1
             if wordsSincePass >= n { wordsSincePass = 0; q.async { self.idle(seq, typing: true) } }
         }
+        return true
     }
 
     private func resolved(_ f: AXField, _ word: String, _ sep: String, _ start: Int, _ seq: Int, _ r: WordResult?, _ inLex: Bool,
@@ -769,6 +808,7 @@ final class TextLayer {
     /// the text changed by our own edit: marks, pills and revertable corrections after it move
     private func edited(at: Int, oldLen: Int, newLen: Int) {
         tracker.applyEdit(at: at, oldLen: oldLen, newLen: newLen)
+        lastWordEnd = lastWordEnd.flatMap { WordFinder.shifted($0, at: at, oldLen: oldLen, newLen: newLen) }
         let d = newLen - oldLen
         pills = pills.compactMap { p in
             if NSMaxRange(p.range) <= at { return p }
