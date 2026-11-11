@@ -6,7 +6,7 @@ import Foundation
 ///  - the pronoun I: i, i'm, i'll, i'd, i've -> I, I'm, I'll, I'd, I've
 ///  - a missing apostrophe, only where the apostrophe-less form isn't an English word ("dont" -> "don't"). Deliberately
 ///    NOT in the table because they are words: wont, cant, its, lets, id, ill, hell, shell, well, were, wed, shed.
-///    Left out as ambiguous: youd, theyd, yall.
+///    Left out as ambiguous: youd, theyd, yall, whos (whose).
 ///
 /// The case of the first letter is kept ("Dont" -> "Don't"); I-words are always capital ("im" -> "I'm"). ALLCAPS and
 /// mixed case are left alone. A curly apostrophe typed in an i-word is kept ("i’m" -> "I’m").
@@ -30,7 +30,6 @@ public enum FixedWords {
         wouldnt wouldn't
         shouldnt shouldn't
         mustnt mustn't
-        neednt needn't
         aint ain't
         youre you're
         youve you've
@@ -39,21 +38,14 @@ public enum FixedWords {
         theyve they've
         theyll they'll
         weve we've
-        hes he's
-        shes she's
-        itll it'll
-        thatll that'll
         wouldve would've
         couldve could've
         shouldve should've
-        mightve might've
-        mustve must've
         thats that's
         whats what's
         theres there's
         heres here's
         wheres where's
-        whos who's
         """
 
     /// typed (lowercase) -> fixed (lowercase)

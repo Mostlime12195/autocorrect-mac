@@ -192,7 +192,7 @@ final class FixedWordsPolicyTests: XCTestCase {
 
     func testMissingApostrophes() {
         for (t, want) in [("dont", "don't"), ("Dont", "Don't"), ("doesnt", "doesn't"), ("youre", "you're"), ("thats", "that's"),
-                          ("wouldve", "would've"), ("aint", "ain't"), ("whos", "who's")] {
+                          ("wouldve", "would've"), ("aint", "ain't")] {
             XCTAssertEqual(Policy.boundary(w(t, t), mode: .suggest, hasPrev: false, prevOut: nil, userWord: false),
                            .apply(out: want, prevNew: nil, merged: false), t)
             // whatever the corrector picked, and in auto mode at any margin
