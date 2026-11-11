@@ -119,7 +119,7 @@ final class Settings {
         set { d.set(newValue, forKey: "shareData") }
     }
 
-    /// "Include sentence context": its own opt-in, off by default, and only ever on while sharing is on
+    /// "Palantir Mode": its own opt-in, off by default, and only ever on while sharing is on
     var shareContext: Bool {
         get { d.bool(forKey: "shareData") && d.bool(forKey: "shareContext") }
         set { d.set(newValue, forKey: "shareContext") }

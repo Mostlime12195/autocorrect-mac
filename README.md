@@ -5,7 +5,7 @@ Keylime and its models are a preview, released to show what they can do and to g
 Menu bar app that fixes typos as you type, in any app, with our small on-device language model (same decoder as the
 Android keyboard). Nothing you type leaves the Mac, unless you turn on **Share correction data** in Settings (off by
 default): then only scrubbed, word-level correction events are uploaded, as described in
-[docs/upload-schema.md](docs/upload-schema.md). A second switch, **Include sentence context** (also off by default),
+[docs/upload-schema.md](docs/upload-schema.md). A second switch, **Palantir Mode** (also off by default),
 adds the scrubbed sentence around each correction to those events.
 
 Apple Silicon only, macOS 13+.

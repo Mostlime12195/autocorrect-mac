@@ -2,7 +2,7 @@ import Foundation
 
 // Opt-in upload events (schema autocorrect-events/3, docs/upload-schema.md): one scrubbed, word-level event per
 // correction decision. Pure Swift so it's unit-tested; the app (TextLayer + Uploader) only feeds decisions in.
-// With the separate "Include sentence context" opt-in (and only then) an event also carries ctx_before / ctx_after:
+// With the separate "Palantir Mode" opt-in (and only then) an event also carries ctx_before / ctx_after:
 // the rest of the current sentence around the word, clipped and scrubbed by Ctx.
 
 /// The on-device scrub rules. A token is 1-20 characters, has a letter, and holds only letters, combining marks and
@@ -72,7 +72,7 @@ public enum Scrub {
     }
 }
 
-/// Sentence context for the "Include sentence context" opt-in (docs/upload-schema.md "Sentence context"). The same
+/// Sentence context for the "Palantir Mode" opt-in (docs/upload-schema.md "Sentence context"). The same
 /// rules, in the same order, as the reference in the autocorrect repo (collect/server.py ctx_token, collect/ctx_ref.py);
 /// CorrectionsTests replays that reference's vectors (CtxVectors.swift).
 ///
@@ -328,7 +328,7 @@ public enum CorrectionEvents {
     }()
 
     /// The upload event for a decision, or nil when the scrub (or a missing piece) drops it.
-    /// includeContext: the "Include sentence context" opt-in is on (and the field allows it); without it there is no
+    /// includeContext: the "Palantir Mode" opt-in is on (and the field allows it); without it there is no
     /// ctx_before / ctx_after, whatever text the decision carries.
     public static func make(_ d: CorrectionDecision, includeContext: Bool = false,
                             id: String = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(),
@@ -371,7 +371,7 @@ public enum CorrectionEvents {
         return e
     }
 
-    /// a queued line without its sentence context (what is sent while "Include sentence context" is off)
+    /// a queued line without its sentence context (what is sent while "Palantir Mode" is off)
     public static func withoutContext(_ line: String) -> String {
         guard line.contains("\"ctx_"), let data = line.data(using: .utf8),
               var e = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return line }
@@ -408,7 +408,7 @@ public enum UploadCore {
     public static let schema = "autocorrect-events/3"
 
     /// exactly schema, install_id, app_version, events (each line is one already-built event). Sentence context is
-    /// taken out again unless "Include sentence context" is on right now (context).
+    /// taken out again unless "Palantir Mode" is on right now (context).
     public static func envelope(installId: String, appVersion: String, lines: [String], context: Bool = false) -> Data? {
         let events = lines.compactMap { l in
             CorrectionEvents.outgoing(l, context: context).data(using: .utf8).flatMap { try? JSONSerialization.jsonObject(with: $0) }

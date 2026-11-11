@@ -17,7 +17,7 @@ fix picked from the underline menu (`suggestion_picked`), "Ignore" (`suggestion_
 fields, while secure input is on, in excluded apps, or in password managers, keychains, authenticators and terminals
 (`CorrectionEvents.neverSharedApps`, which applies even if the user removed such an app from the excluded list).
 
-**Include sentence context** (same section, a separate switch that is off by default and disabled while sharing is
+**Palantir Mode** (same section, a separate switch that is off by default and disabled while sharing is
 off) adds `ctx_before` / `ctx_after` to new events: the rest of the sentence around the corrected word, read from the
 field when the outcome is known (240 UTF-16 units before, 120 after) and clipped and scrubbed by `Ctx` in
 `Corrections.swift` (rules below, "Sentence context"). `Uploader.record` checks the switch for every event, the upload
@@ -43,7 +43,7 @@ kept, and how it's exported for training. This file is the contract for both app
 - **One event per correction decision, one word at a time.** No field contents, no keystrokes or touch points, no app
   or package names, no timestamps finer than a day. No sentences either, unless the user also turns on the second
   switch below.
-- **Sentence context is a second, separate opt-in** ("Include sentence context"), off by default and only available
+- **Sentence context is a second, separate opt-in** ("Palantir Mode"), off by default and only available
   while sharing is on. With it, an event also carries the rest of the sentence the word was in, clipped and scrubbed
   on the device (see "Sentence context"). Turning it off removes the context from everything still queued; turning
   sharing off turns it off too.
@@ -76,7 +76,7 @@ Android, `UUID()` on Mac); it is not tied to the device, account or OS. Up to 50
  "ctx_before": "I think we should see you", "ctx_after": "soon, around <num> ok?"}
 ```
 
-The last line (`ctx_before` / `ctx_after`) is only there when the user turned on "Include sentence context".
+The last line (`ctx_before` / `ctx_after`) is only there when the user turned on "Palantir Mode".
 
 | field | required | rule |
 |---|---|---|
@@ -157,7 +157,7 @@ The server re-checks rules 2-4 (tokens, lowercase context, lengths, counts) and 
 
 ## Sentence context (`ctx_before` / `ctx_after`, second opt-in)
 
-Only when "Include sentence context" is on (it can't be on without sharing, and is off by default). The setting's
+Only when "Palantir Mode" is on (it can't be on without sharing, and is off by default). The setting's
 description says what it does: it also sends the sentence around each correction. Everything below happens on the
 device before the event is queued; the opt-in is checked when the decision is made, again when the event is queued,
 and again when a batch is sent (context is stripped from queued events if it is off by then).
@@ -216,7 +216,7 @@ half typed).
   `DELETE /api/v1/install/{id}`) or the maintainer does.
 - On the device: the queue (`filesDir/upload/corrections.jsonl` on Android, `~/Library/Application Support/Autocorrect/upload/corrections.jsonl`
   on Mac) holds only scrubbed events, is trimmed after upload, capped in size, and cleared by "Delete my uploaded
-  data" or by turning sharing off. Turning "Include sentence context" off rewrites it without `ctx_before` /
+  data" or by turning sharing off. Turning "Palantir Mode" off rewrites it without `ctx_before` /
   `ctx_after`.
 - The old v1 schema (`autocorrect-events/1`: 120 characters of context, touch points, candidate scores) is retired:
   the server answers 410 `schema_retired` (set `COLLECT_ACCEPT_V1=1` to accept it again). Rows stored before v2 stay in
