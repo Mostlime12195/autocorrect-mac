@@ -319,17 +319,20 @@ final class InputController {
         held = nil
         // the user switched apps meanwhile: never type into another app
         var r2 = h.app == frontApp ? r : nil
-        // only confident corrections are typed (no underlines without Accessibility)
+        var out: String? = nil
+        // only confident corrections are typed (no underlines without Accessibility), as the policy wrote them
         if let rr = r2 {
             let o = WordOutcome(rr, typedOOV: !inLex)
-            if case .apply = Policy.boundary(o, mode: settings.mode, hasPrev: h.job.prev != nil, prevOut: nil, userWord: false,
-                                             penalty: { [engine] a, b in engine.user.penalty(a, b) },
+            if case .apply(let w, _, let merged) = Policy.boundary(o, mode: settings.mode, hasPrev: h.job.prev != nil, prevOut: nil,
+                                             userWord: false, penalty: { [engine] a, b in engine.user.penalty(a, b) },
                                              nameLike: Policy.nameLike(h.job.typed, left: h.job.input.left),
-                                             capI: engine.effectiveStyle != "casual") {} else { r2 = nil }
+                                             capI: engine.effectiveStyle != "casual") {
+                if !merged { out = w }
+            } else { r2 = nil }
         }
         core.capI = engine.effectiveStyle != "casual"
         var evs: [CGEvent] = []
-        let inj = core.resolve(h.job, r2)
+        let inj = core.resolve(h.job, r2, out: out)
         if let inj = inj {
             evs = synth(inj)
             corrections += 1
