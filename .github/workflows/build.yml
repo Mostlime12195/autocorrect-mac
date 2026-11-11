@@ -90,3 +90,73 @@ jobs:
           gh release create "$GITHUB_REF_NAME" dist/Keylime-mac-$VERSION.zip --title "Keylime for Mac $VERSION" \
             --notes "Self-signed, not notarized: see the README for first launch." || \
           gh release upload "$GITHUB_REF_NAME" dist/Keylime-mac-$VERSION.zip --clobber
+
+  # Experimental, manual runs only, never blocks: the built app against a real text field, counting fixes. Needs
+  # Accessibility for Keylime on the runner (inherited from the runner's own grant, or inserted into TCC.db).
+  e2e:
+    needs: build
+    if: github.event_name == 'workflow_dispatch'
+    continue-on-error: true
+    runs-on: macos-15
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: Keylime-mac-*
+          merge-multiple: true
+          path: dist
+      - name: Environment
+        run: |
+          sw_vers; csrutil status || true
+          cd dist && ditto -x -k Keylime-mac-*.zip . && ls
+      - name: Build the target
+        run: swiftc -O scripts/e2e/typing_target.swift -o "$RUNNER_TEMP/typing_target"
+      - name: Grant Accessibility (TCC.db; needs SIP off)
+        run: |
+          APP="$PWD/dist/Keylime.app/Contents/MacOS/Keylime"
+          for c in "$APP" "$RUNNER_TEMP/typing_target"; do
+            for db in "/Library/Application Support/com.apple.TCC/TCC.db" "$HOME/Library/Application Support/com.apple.TCC/TCC.db"; do
+              for s in kTCCServiceAccessibility kTCCServiceListenEvent kTCCServicePostEvent; do
+                sudo sqlite3 "$db" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version,flags) VALUES ('$s','$c',1,2,4,1,0);" \
+                  && echo "granted $s $c in $db" || echo "FAILED $s $c in $db"
+              done
+            done
+          done
+      - name: Start Keylime (auto mode) and wait for the model
+        run: |
+          D=dev.mostlime.autocorrect-mac
+          defaults write $D mode auto
+          defaults write $D askedSystemAutocorrect -bool true
+          defaults write -g NSAutomaticSpellingCorrectionEnabled -bool false
+          dist/Keylime.app/Contents/MacOS/Keylime > "$RUNNER_TEMP/keylime.log" 2>&1 &
+          M="$HOME/Library/Application Support/Autocorrect/models"
+          for i in $(seq 1 120); do
+            n=$(ls -a "$M" 2>/dev/null | grep -c '\.sha256$' || true)
+            if [ "$n" -ge 2 ]; then echo "model installed after ${i}s"; break; fi
+            sleep 1
+          done
+          ls -la "$M" || true
+          sleep 15
+          pgrep -fl Keylime || { echo "Keylime died"; cat "$RUNNER_TEMP/keylime.log"; exit 1; }
+      - name: Type into an NSTextView
+        run: |
+          "$RUNNER_TEMP/typing_target" 80 | tee e2e.log
+          "$RUNNER_TEMP/typing_target" 30 | tee -a e2e.log
+      - name: Type into an Electron textarea
+        run: |
+          cd scripts/e2e/electron
+          npx --yes electron@33.2.1 . 2>&1 | grep -v -i "cache\|gpu" | tee "$RUNNER_TEMP/electron.log" &
+          for i in $(seq 1 120); do grep -q "ready" "$RUNNER_TEMP/electron.log" 2>/dev/null && break; sleep 1; done
+          sleep 2
+          "$RUNNER_TEMP/typing_target" 60 --post-only
+          for i in $(seq 1 60); do grep -q "E2E RESULT" "$RUNNER_TEMP/electron.log" && break; sleep 2; done
+          cat "$RUNNER_TEMP/electron.log"
+      - name: Keylime log
+        if: always()
+        run: |
+          cat "$RUNNER_TEMP/keylime.log" || true
+          log show --last 5m --predicate 'subsystem == "dev.mostlime.autocorrect-mac"' --style compact 2>/dev/null | tail -100 || true
