@@ -238,6 +238,8 @@ public final class NeuralScorer: LmScorer {
     public let tok: SPTokenizer
     public let step: StepModel
     public var styleId: Int?
+    /// most candidate rows per ORT run (peak memory grows with the batch; results don't depend on it)
+    public var maxRows = 32
     private let cacheSize: Int
     private var cache: [String: ([Int], LmState)] = [:]
     private var cacheOrder: [String] = []   // LRU, oldest first
@@ -342,17 +344,25 @@ public final class NeuralScorer: LmScorer {
         while ctxs.allSatisfy({ $0.count > p }) && ctxs.allSatisfy({ $0[p] == ctxs[0][p] }) { p += 1 }
         let pre: LmState = p > 0 ? try prefix(Array(ctxs[0][0..<p])) : step.fresh()
         let rems = keys.map { Array($0.ctx[p...]) + $0.tgt }
-        let o = try step.run(rems, pos0: p, state: pre, keepState: false)
-        tokensRun += rems.reduce(0) { $0 + $1.count }
-        for (b, kk) in keys.enumerated() {
-            var s = 0.0
-            for q in 0..<kk.tgt.count {
-                let j = kk.ctx.count - p + q
-                s += j == 0 ? Double(pre.last![kk.tgt[q]]) : Double(o.tokLp[b * o.n + j - 1])
+        // Rows are independent, so the batch runs in chunks: every row computes full-vocab logits, and one big batch
+        // sets a peak the allocator keeps (hundreds of MB for a few hundred rows).
+        var lo = 0
+        while lo < rems.count {
+            let hi = lo + min(max(1, maxRows), rems.count - lo)
+            let o = try step.run(Array(rems[lo..<hi]), pos0: p, state: pre, keepState: false)
+            for b in lo..<hi {
+                let kk = keys[b], r = b - lo
+                var s = 0.0
+                for q in 0..<kk.tgt.count {
+                    let j = kk.ctx.count - p + q
+                    s += j == 0 ? Double(pre.last![kk.tgt[q]]) : Double(o.tokLp[r * o.n + j - 1])
+                }
+                if !kk.eot { s += Double(o.bnd[r * o.n + rems[b].count - 1]) }
+                out[b] = s
             }
-            if !kk.eot { s += Double(o.bnd[b * o.n + rems[b].count - 1]) }
-            out[b] = s
+            lo = hi
         }
+        tokensRun += rems.reduce(0) { $0 + $1.count }
         return out
     }
 }
