@@ -65,12 +65,19 @@ final class MemoryTests: XCTestCase {
             sc.maxRows = rows
             return try sc.score(reqs)
         }
+        let mbs = { (b: Int) in String(format: "%.0f", Double(b) / 1_048_576) }
+        let r0 = Self.resident()
         _ = try score(32)   // warm-up: first-run allocations out of the measurement
+        let r1 = Self.resident()
         var chunked: [Double] = [], whole: [Double] = [], tiny: [Double] = []
         let gChunked = try Self.peakGrowth { chunked = try score(32) }
+        let rC = Self.resident()
         let gWhole = try Self.peakGrowth { whole = try score(Int.max) }
+        let rW = Self.resident()
         tiny = try score(5)
-        let mb = { (b: Int) in String(format: "%.0f MB", Double(b) / 1_048_576) }
+        let r3 = Self.resident()
+        let mb = { (b: Int) in mbs(b) + " MB" }
+        print("RSSLOG resident MB: session open \(mbs(r0)), after chunked warm-up \(mbs(r1)), after chunked run \(mbs(rC)), after one-batch run \(mbs(rW)), after chunk-5 run \(mbs(r3))")
         print("peak growth over \(reqs.count) candidates: chunks of 32 \(mb(gChunked)), one batch \(mb(gWhole)); scores identical: \(chunked == whole && chunked == tiny)")
         XCTAssertEqual(chunked, whole, "chunked scores differ from one big batch")
         XCTAssertEqual(chunked, tiny, "chunk size 5 differs")
