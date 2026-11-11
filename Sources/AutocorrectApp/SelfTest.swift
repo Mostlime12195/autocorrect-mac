@@ -1,10 +1,47 @@
 import Engine
 import Foundation
 import KeylimeCore
+import Darwin
 
 /// `Keylime --selftest <model dir>`: the bundled app end to end without the UI (CI runs it on the built .app):
 /// lexicon from the bundle, onnxruntime from Contents/Frameworks, the model from the dir (manifest.json + files).
 enum SelfTest {
+    /// `Keylime --rsstest <model dir> <rows per run>`: fresh-process memory of scoring 240 candidates of one slot with
+    /// the m2s int4 graph. Prints resident / peak sizes and a checksum of the scores (equal across row limits).
+    static func rss(_ args: [String]) -> Int32 {
+        guard let i = args.firstIndex(of: "--rsstest"), i + 2 < args.count, let rows = Int(args[i + 2]) else { print("usage: --rsstest <model dir> <rows>"); return 2 }
+        func mb(_ b: Int) -> String { String(format: "%.0f", Double(b) / 1_048_576) }
+        func cur() -> Int {
+            var info = mach_task_basic_info()
+            var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size / MemoryLayout<integer_t>.size)
+            let kr = withUnsafeMutablePointer(to: &info) { $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count) } }
+            return kr == KERN_SUCCESS ? Int(info.resident_size) : 0
+        }
+        func peak() -> Int { var u = rusage(); getrusage(RUSAGE_SELF, &u); return u.ru_maxrss }   // bytes on macOS
+        do {
+            let dir = URL(fileURLWithPath: args[i + 1])
+            let manifest = try Manifest.parse(Data(contentsOf: dir.appendingPathComponent("manifest.json")))
+            guard let spec = manifest.models.first(where: { $0.graph.file.contains("int4m") }) else { print("no int4m model"); return 1 }
+            let step = try StepModel.open(path: dir.appendingPathComponent(spec.graph.file).path, meta: spec.meta, threads: 4)
+            let tok = try SPTokenizer.fromJSON(Data(contentsOf: dir.appendingPathComponent(spec.vocab.file)))
+            let sc = NeuralScorer(tok: tok, step: step, styleId: spec.styleToken("standard"))
+            sc.maxRows = rows
+            let left = "hey are you coming to the party tonight or are you staying home because i think everyone else is going and"
+            let words = ["not", "now", "nit", "know", "note", "noted", "nothing", "never", "new", "next", "nice", "night", "nine", "no",
+                         "yes", "yeah", "yep", "maybe", "might", "mind", "mine", "miss", "missed", "more", "most", "much", "must", "my",
+                         "the", "then", "there", "their", "they", "them", "this", "that", "those", "though", "through", "thought"]
+            var reqs = words.flatMap { w in ["", "s", "ed", "ing", "er"].map { LmReq(left, " " + w + $0) } }
+            reqs += words.map { LmReq(left, " " + $0 + ".") }
+            let r0 = cur()
+            var sum: UInt64 = 1469598103934665603
+            for _ in 0..<3 {
+                for s in try sc.score(reqs) { sum = (sum ^ s.bitPattern) &* 1099511628211 }
+            }
+            print("RSSTEST rows/run \(rows): session open \(mb(r0)) MB, after 3 scorings of \(reqs.count) candidates: resident \(mb(cur())) MB, peak \(mb(peak())) MB, checksum \(String(sum, radix: 16))")
+            return 0
+        } catch { print("FAIL: \(error)"); return 1 }
+    }
+
     static func run(_ args: [String]) -> Int32 {
         guard let i = args.firstIndex(of: "--selftest"), i + 1 < args.count else { print("usage: --selftest <model dir>"); return 2 }
         let dir = URL(fileURLWithPath: args[i + 1])

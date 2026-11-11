@@ -1,5 +1,8 @@
 import AppKit
 
+if CommandLine.arguments.contains("--rsstest") {
+    exit(SelfTest.rss(CommandLine.arguments))
+}
 if CommandLine.arguments.contains("--selftest") {
     exit(SelfTest.run(CommandLine.arguments))
 }

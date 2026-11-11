@@ -75,6 +75,9 @@ jobs:
         env:
           KL_REQUIRE_SIGNED: ${{ env.SIGN_IDENTITY != '' && '1' || '0' }}
         run: dist/Keylime.app/Contents/MacOS/Keylime --selftest models
+      - name: Memory of one big candidate batch vs chunks (fresh process each)
+        run: |
+          for r in 100000 32 8; do dist/Keylime.app/Contents/MacOS/Keylime --rsstest models $r | grep RSSTEST; done
       - uses: actions/upload-artifact@v4
         with:
           name: Keylime-mac-${{ env.VERSION }}
