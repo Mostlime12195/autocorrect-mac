@@ -88,6 +88,9 @@ final class TextLayer {
         // a two-word merge (never reported), and whether its decision went out already
         var alts: [String] = []; var gap: Double? = nil; var oov = false; var merged = false
         var reported = false
+        /// an ambiguous non-word fix (two about equally likely fixes): reverting it by its pill underlines the word with
+        /// the other fixes, runner-up first, so it's one click away
+        var others: [String] = []
     }
     private struct Pill { let id: Int; var range: NSRange; let text: String; let until: Date }
     private struct Preview { let start: Int; let word: String; let out: String }
@@ -586,6 +589,8 @@ final class TextLayer {
             prev = nil
             let margin = o.margin
             let alts = o.fixes.filter { $0 != out }, gap = o.gap, oov = o.typedOOV
+            var others: [String] = []
+            if !merged, prevNew == nil, case .ambiguous(_) = Policy.nonWord(o, nameLike: nameLike) { others = alts.filter { $0.lowercased() != out.lowercased() } }
             // written when it's safe: never into the word being typed; mid-word it waits for the separator / a pause
             fix(PendingFix(f: f, range: range, old: oldText, new: newText, made: Date()) { [weak self] res, at in
                 guard let self = self else { return }
@@ -597,7 +602,7 @@ final class TextLayer {
                     let pid = self.addPill(NSRange(location: at, length: newLen), newText)
                     self.recents.append(Recent(start: at, newText: newText, oldText: oldText, word: word, learnTyped: merged ? oldText : word,
                                                out: out, sep: sep, pillId: pid, until: Date().addingTimeInterval(Self.REVERT_SECS),
-                                               alts: alts, gap: gap, oov: oov, merged: merged))
+                                               alts: alts, gap: gap, oov: oov, merged: merged, others: others))
                     if self.recents.count > 6 { self.reportKept(self.recents.removeFirst()) }
                     // backspace undoes it, and it's the previous word for the next one, while nothing else was typed
                     self.lock.lock(); let fresh = self.keySeq == seq; if fresh { self.undoArmed = seq }; self.lock.unlock()
@@ -800,6 +805,9 @@ final class TextLayer {
         pills.removeAll { $0.id == rc.pillId }
         keepOnce = (at + newLen - (rc.word as NSString).length, rc.word)
         prev = nil
+        if !viaBackspace && !rc.others.isEmpty {
+            tracker.add(start: at + newLen - (rc.word as NSString).length, word: rc.word, fixes: rc.others + [rc.out], spelling: true, gap: rc.gap)
+        }
         pushOverlay()
         // Learning waits a few seconds: an undo followed by retyping the same correction was an accident, not a
         // rejection. Otherwise, as backspace-undo on Android: the edit needs more evidence for a week (and a non-word

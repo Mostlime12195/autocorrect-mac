@@ -206,8 +206,9 @@ public final class TypingCore {
     }
 
     /// The held word end resolved: the correction result, or nil (too slow / skipped / failed).
-    /// -> the edit to synthesize before the separator goes out (nil = none).
-    public func resolve(_ job: CorrectionJob, _ r: WordResult?) -> Injection? {
+    /// -> the edit to synthesize before the separator goes out (nil = none). out: the word's text as the policy decided it
+    /// (Policy.boundary's .apply), when it differs from the corrector's choice (a non-word fix, FixedWords).
+    public func resolve(_ job: CorrectionJob, _ r: WordResult?, out override: String? = nil) -> Injection? {
         guard pending?.id == job.id else { return nil }
         pending = nil
         word = ""
@@ -222,7 +223,7 @@ public final class TypingCore {
         // the previous word's new text: its re-check and/or the formal style's comma after it
         let prevNew = (mg == nil && hasPrev) ? (r.prevText ?? r.recheck?.to).map { Self.keepCase(capIWords($0), of: job.prevOut) }
             .flatMap { $0 != job.prevOut ? $0 : nil } : nil
-        let out = capIWords(mg?.to ?? r.out)
+        let out = override ?? capIWords(mg?.to ?? r.out)
         let changed = out != job.typed || prevNew != nil
         if !changed {
             append(job.typed + job.sep)

@@ -5,7 +5,7 @@ import Foundation
 public enum CorrectionMode: String, CaseIterable {
     /// confident fixes are applied, everything else flagged is underlined
     case auto
-    /// underline everything flagged, never change the text (the default)
+    /// underline everything flagged; the only edits are the fixed words (i -> I, dont -> don't; FixedWords) (the default)
     case suggest
     case off
 
@@ -67,14 +67,16 @@ public enum Policy {
     public static let FLAG_MARGIN = 1.5
     /// the idle pass only changes text (auto mode, current sentence, spelling fixes) at this gap
     public static let IDLE_APPLY_GAP = 4.0
-    /// a non-word whose two best fixes are both one edit away and closer than this is truly ambiguous: underlined
+    /// a non-word whose two best fixes are both one edit away and closer than this is ambiguous: applied in
+    /// auto mode with the runner-up kept as the alternative, underlined with both in suggest mode
     public static let AMBIGUOUS_GAP = 1.0
 
     public enum NonWord: Equatable {
         /// fix it with this (the LM only chose between candidates)
         case fix(String)
-        /// two fixes, both one edit away, about equally likely: underline
-        case ambiguous
+        /// two fixes, both one edit away, about equally likely: the best one (auto mode applies it; suggest mode
+        /// underlines with both)
+        case ambiguous(String)
         /// not a plain non-word typo: the margin rule decides
         case notApplicable
     }
@@ -87,7 +89,7 @@ public enum Policy {
         guard o.typedOOV, !nameLike, t.count >= 4, plainCase(t), !stretched(t), let best = o.fixes.first, !best.contains(" "),
               QualityGuard.looksLikeSlip(t, of: best) else { return .notApplicable }
         if o.fixes.count > 1, !o.fixes[1].contains(" "), QualityGuard.looksLikeSlip(t, of: o.fixes[1]), o.fixGap < AMBIGUOUS_GAP {
-            return .ambiguous
+            return .ambiguous(best)
         }
         return .fix(best)
     }
@@ -141,29 +143,39 @@ public enum Policy {
 
     /// Stage (b): a word just ended. hasPrev: the previous word is still right before it (re-check / merge possible).
     /// nameLike: capitalised mid-sentence (Policy.nameLike); forceNonWords: false = the old margin-only rule;
-    /// capI: standalone i -> I (every style except casual, which keeps text as typed)
+    /// capI: standalone i -> I and the missing-apostrophe table (FixedWords), every style except casual, which keeps
+    /// text as typed. Those fixed words are applied in suggest mode too.
+    /// An edit the user undid (penalty > 0) is never applied again while the penalty lasts: underlined at most.
     public static func boundary(_ o: WordOutcome, mode: CorrectionMode, hasPrev: Bool, prevOut: String?, userWord: Bool,
                                 penalty: (String, String) -> Double = { _, _ in 0 }, nameLike: Bool = false,
                                 forceNonWords: Bool = true, capI: Bool = true) -> Boundary {
         if mode == .off || userWord { return .keep }
+        let mg = hasPrev ? o.merge : nil
+        // i -> I, dont -> don't: one right answer, the same every time (unless the user undid it)
+        if capI && mg == nil && !nameLike, let fx = FixedWords.fix(o.typed) {
+            if penalty(o.typed, fx) > 0 { return .keep }
+            // the formal style's sentence-start capital on the same word ("dont" -> "Don't")
+            let out = o.out != fx && o.out.lowercased() == fx.lowercased() && o.out.first?.isUppercase == true ? o.out : fx
+            let rc = mode == .auto && hasPrev ? o.recheck.map { TypingCore.keepCase(capIfOn($0, capI, penalty), of: prevOut) } : nil
+            return .apply(out: out, prevNew: rc != nil && rc != prevOut ? rc : nil, merged: false)
+        }
         // re-casing a mixed-case / ALLCAPS word (iPhone -> iphone) is neither a fix nor worth an underline
         if forceNonWords && recasing(o.typed, o.out) && o.merge == nil && o.recheck == nil { return .keep }
         let nw = forceNonWords ? nonWord(o, nameLike: nameLike) : .notApplicable
         let flag: Boundary = (o.out != o.typed && o.gap >= FLAG_MARGIN && !o.fixes.isEmpty) || nw != .notApplicable ?
             .flag(fixes: o.fixes, spelling: o.typedOOV || isSpellingEdit(o.typed, o.out, typedOOV: o.typedOOV)) : .keep
         if mode == .suggest { return flag }
-        let mg = hasPrev ? o.merge : nil
-        // a plain non-word typo: fixed with the best candidate, consistently (no margin); only truly ambiguous ones
-        // are underlined
+        // a plain non-word typo: fixed with the best candidate, consistently (no margin). Two about equally likely fixes
+        // (ambiguous): the best is applied too, the runner-up stays one click away (the correction's alternatives).
+        // Undone before (for either of the two best fixes): underlined only.
         if mg == nil {
             switch nw {
-            case .fix(let best):
+            case .fix(let best), .ambiguous(let best):
+                if o.fixes.prefix(2).contains(where: { penalty(o.typed, $0) > 0 }) { return flag }
                 let rc = hasPrev ? o.recheck.map { TypingCore.keepCase(capIfOn($0, capI, penalty), of: prevOut) } : nil
                 // the formal style's capital on the same word ("teh" at a sentence start -> "The")
                 let fixed = o.out != best && o.out.lowercased() == best.lowercased() && Policy.plainCase(o.out) ? o.out : best
                 return .apply(out: capIfOn(fixed, capI, penalty), prevNew: rc != nil && rc != prevOut ? rc : nil, merged: false)
-            case .ambiguous:
-                return flag
             case .notApplicable:
                 break
             }
@@ -176,6 +188,8 @@ public enum Policy {
         if out == o.typed && prevNew == nil { return .keep }
         // odd-looking non-words (iPhone, NASA, sooo, a name mid-sentence) are never changed by themselves: underline
         if forceNonWords && out != o.typed && isProtected(o.typed, out: out, typedOOV: o.typedOOV) { return flag }
+        // the user undid this edit: not again (the corrector's own penalty may not have been enough to change its pick)
+        if mg == nil && out != o.typed && penalty(o.typed, out) > 0 { return flag }
         return .apply(out: out, prevNew: prevNew, merged: mg != nil)
     }
 
