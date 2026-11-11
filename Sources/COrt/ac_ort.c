@@ -61,8 +61,6 @@ AcSession *ac_session_open(const char *path, int threads, int ort_format, char *
     TRY(g_api->CreateSessionOptions(&opts));
     TRY(g_api->SetIntraOpNumThreads(opts, threads));
     TRY(g_api->SetInterOpNumThreads(opts, 1));
-    // the CPU arena keeps the largest batch's buffers forever; plain malloc gives them back
-    TRY(g_api->DisableCpuMemArena(opts));
     // workers block instead of spinning: short bursts at word end, sharing the CPU with the app being typed in
     TRY(g_api->AddSessionConfigEntry(opts, "session.intra_op.allow_spinning", "0"));
     if (ort_format) {
